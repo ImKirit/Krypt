@@ -1,0 +1,17 @@
+[package]
+name = "krypt-store"
+description = "SQLite vault storage for Krypt: schema, migrations, key slots, backups."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+krypt-core = { version = "0.1.0", path = "../krypt-core" }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+uuid = "1.26.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"

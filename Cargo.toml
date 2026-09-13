@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["crates/krypt-core", "crates/krypt-store"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ImKirit/Krypt"
+
+# Argon2 with real parameters takes minutes in an unoptimized build.
+# Optimizing dependencies keeps `cargo test` usable without touching our own debug info.
+[profile.dev.package."*"]
+opt-level = 3

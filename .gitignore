@@ -1,0 +1,37 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Tauri
+src-tauri/gen/schemas/
+src-tauri/WixTools/
+
+# Build output and release assets
+release/
+*.msi
+*.exe
+*.blockmap
+
+# Local vaults, exports and secrets never go into the repo
+*.krypt
+*.krypt-backup
+*.csv
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
