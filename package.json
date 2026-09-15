@@ -1,0 +1,7 @@
+{
+  "name": "krypt",
+  "private": true,
+  "workspaces": [
+    "apps/desktop"
+  ]
+}

@@ -8,8 +8,11 @@ dist/
 *.tsbuildinfo
 
 # Tauri
-src-tauri/gen/schemas/
-src-tauri/WixTools/
+**/src-tauri/gen/
+**/src-tauri/WixTools/
+
+# Screenshots and throwaway vaults from scripts/drive.mjs
+apps/desktop/scripts/out/
 
 # Build output and release assets
 release/
