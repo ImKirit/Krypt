@@ -22,6 +22,18 @@ pub(crate) fn stamp(ms: i64) -> String {
     )
 }
 
+/// A proleptic Gregorian date to days since 1970-01-01.
+/// Howard Hinnant, "chrono-Compatible Low-Level Date Algorithms".
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let mp = i64::from((month + 9) % 12);
+    let doy = (153 * mp + 2) / 5 + i64::from(day) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 /// Days since 1970-01-01 to a proleptic Gregorian date.
 /// Howard Hinnant, "chrono-Compatible Low-Level Date Algorithms".
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
@@ -47,5 +59,16 @@ mod tests {
         assert_eq!(stamp(951_782_400_000), "20000229-000000-000");
         let evening = 1_789_257_600_000 + 18 * 3_600_000 + 20 * 60_000 + 5_123;
         assert_eq!(stamp(evening), "20260913-182005-123");
+    }
+
+    #[test]
+    fn days_and_dates_convert_both_ways() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 2, 29), 11_016);
+        assert_eq!(days_from_civil(2026, 9, 13), 20_709);
+        for days in [-800_000, -1, 0, 59, 11_016, 20_709, 400_000] {
+            let (year, month, day) = civil_from_days(days);
+            assert_eq!(days_from_civil(year, month, day), days);
+        }
     }
 }

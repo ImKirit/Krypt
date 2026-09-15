@@ -138,6 +138,27 @@ impl Vault {
         self.replace_slots(SlotKind::Password, &slot)
     }
 
+    /// Checks the master password without changing anything, for example before a password
+    /// change.
+    pub fn check_password(&self, password: &str) -> Result<bool> {
+        for slot in read_slots(&self.conn, SlotKind::Password)? {
+            match slot.unlock_with_password(password) {
+                Ok(key) => return Ok(key.same_as(&self.key)),
+                Err(krypt_core::Error::Decrypt) => {}
+                Err(other) => return Err(other.into()),
+            }
+        }
+        Ok(false)
+    }
+
+    /// Argon2id costs of the password slot, to decide whether it should be rewritten with
+    /// stronger ones.
+    pub fn password_kdf_params(&self) -> Result<Option<KdfParams>> {
+        Ok(read_slots(&self.conn, SlotKind::Password)?
+            .first()
+            .and_then(|slot| slot.kdf.map(|kdf| kdf.params)))
+    }
+
     /// Issues a new recovery key. The old one stops working.
     pub fn replace_recovery_key(&mut self) -> Result<RecoveryKey> {
         let recovery_key = RecoveryKey::generate()?;
@@ -236,9 +257,9 @@ impl Vault {
         backup::copy(&self.conn, dest.as_ref())
     }
 
-    /// Writes a copy into `backups/` next to the vault and keeps the newest `keep` copies.
-    pub fn create_backup(&self, keep: usize) -> Result<PathBuf> {
-        backup::rotate(&self.conn, &self.path, keep)
+    /// Writes a copy into `backups/` next to the vault and prunes older copies by `retention`.
+    pub fn create_backup(&self, retention: backup::BackupRetention) -> Result<PathBuf> {
+        backup::rotate(&self.conn, &self.path, retention)
     }
 
     fn replace_slots(&mut self, kind: SlotKind, slot: &KeySlot) -> Result<()> {
@@ -405,24 +426,7 @@ impl LockedVault {
     }
 
     fn slots(&self, kind: SlotKind) -> Result<Vec<KeySlot>> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, kdf_algorithm, kdf_m_cost, kdf_t_cost, kdf_p_cost, kdf_salt, wrapped_key
-             FROM key_slots WHERE kind = ?1",
-        )?;
-        let rows = statement
-            .query_map(params![kind.as_str()], |row| {
-                Ok(SlotRow {
-                    id: row.get(0)?,
-                    kdf_algorithm: row.get(1)?,
-                    m_cost: row.get(2)?,
-                    t_cost: row.get(3)?,
-                    p_cost: row.get(4)?,
-                    salt: row.get(5)?,
-                    wrapped_key: row.get(6)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows.into_iter().map(|row| row.into_slot(kind)).collect()
+        read_slots(&self.conn, kind)
     }
 
     fn vault_id(&self) -> Result<Uuid> {
@@ -579,6 +583,27 @@ impl SlotRow {
             .ok_or(Error::Corrupt("password slot has an invalid salt"))?;
         Ok(PasswordKdf { params, salt })
     }
+}
+
+fn read_slots(conn: &Connection, kind: SlotKind) -> Result<Vec<KeySlot>> {
+    let mut statement = conn.prepare(
+        "SELECT id, kdf_algorithm, kdf_m_cost, kdf_t_cost, kdf_p_cost, kdf_salt, wrapped_key
+         FROM key_slots WHERE kind = ?1",
+    )?;
+    let rows = statement
+        .query_map(params![kind.as_str()], |row| {
+            Ok(SlotRow {
+                id: row.get(0)?,
+                kdf_algorithm: row.get(1)?,
+                m_cost: row.get(2)?,
+                t_cost: row.get(3)?,
+                p_cost: row.get(4)?,
+                salt: row.get(5)?,
+                wrapped_key: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    rows.into_iter().map(|row| row.into_slot(kind)).collect()
 }
 
 fn insert_slot(conn: &Connection, slot: &KeySlot, now: i64) -> Result<()> {

@@ -12,5 +12,6 @@ mod schema;
 mod time;
 mod vault;
 
+pub use backup::BackupRetention;
 pub use error::{Error, Result};
 pub use vault::{LockedVault, NewVault, Record, UnlockFailed, UnlockResult, Vault};

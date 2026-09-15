@@ -5,7 +5,7 @@ use krypt_core::crypto::KdfParams;
 use krypt_core::model::{ApiKey, DomainRule, Item, ItemData, Login, Service};
 use krypt_core::recovery::RecoveryKey;
 use krypt_core::secret::Secret;
-use krypt_store::{Error, LockedVault, Vault};
+use krypt_store::{BackupRetention, Error, LockedVault, Vault};
 use rusqlite::{Connection, params};
 
 /// Real parameters cost 64 MiB per unlock; the tests only need the same code path.
@@ -446,8 +446,38 @@ fn backups_open_like_the_original_and_rotate() {
     );
 
     for _ in 0..5 {
-        vault.create_backup(3).unwrap();
+        vault
+            .create_backup(BackupRetention {
+                recent: 3,
+                weeks: 0,
+            })
+            .unwrap();
     }
     let kept = fs::read_dir(dir.path().join("backups")).unwrap().count();
     assert_eq!(kept, 3);
+}
+
+#[test]
+fn the_password_can_be_checked_without_changing_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut vault, _) = new_vault(dir.path());
+    assert!(vault.check_password(PASSWORD).unwrap());
+    assert!(!vault.check_password("not it").unwrap());
+    vault.change_password("next password", FAST).unwrap();
+    assert!(!vault.check_password(PASSWORD).unwrap());
+    assert!(vault.check_password("next password").unwrap());
+}
+
+#[test]
+fn the_password_slot_reports_its_costs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut vault, _) = new_vault(dir.path());
+    assert_eq!(vault.password_kdf_params().unwrap(), Some(FAST));
+    let stronger = KdfParams {
+        m_cost_kib: 128,
+        t_cost: 2,
+        p_cost: 1,
+    };
+    vault.change_password(PASSWORD, stronger).unwrap();
+    assert_eq!(vault.password_kdf_params().unwrap(), Some(stronger));
 }

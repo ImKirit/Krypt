@@ -37,6 +37,10 @@ pub fn seal<T: Serialize>(
     id: Uuid,
     value: &T,
 ) -> Result<Vec<u8>> {
+    // Inside `secret::masked` every secret would be written as the placeholder and lost.
+    if crate::secret::masking_active() {
+        return Err(Error::Format);
+    }
     let mut json = Zeroizing::new(Vec::with_capacity(1024));
     serde_json::to_writer(&mut *json, value).map_err(|_| Error::Format)?;
     crypto::seal(vault_key, &json, &aad(kind, id))
