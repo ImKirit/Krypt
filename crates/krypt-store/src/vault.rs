@@ -262,6 +262,21 @@ impl Vault {
         backup::rotate(&self.conn, &self.path, retention)
     }
 
+    /// Saves many services and items in one transaction: all of them, or none if one fails.
+    /// Much faster than one write each, since the file is synced once.
+    pub fn put_all(&mut self, services: &[Service], items: &[Item]) -> Result<()> {
+        let now = now_ms();
+        let tx = self.conn.transaction()?;
+        for service in services {
+            Self::put_on(&tx, &self.key, service, now)?;
+        }
+        for item in items {
+            Self::put_on(&tx, &self.key, item, now)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn replace_slots(&mut self, kind: SlotKind, slot: &KeySlot) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -276,8 +291,11 @@ impl Vault {
     }
 
     fn put<T: Stored>(&mut self, value: &T) -> Result<i64> {
-        let id = value.id();
-        let data = value.seal(&self.key)?;
+        Self::put_on(&self.conn, &self.key, value, now_ms())
+    }
+
+    fn put_on<T: Stored>(conn: &Connection, key: &Key, value: &T, now: i64) -> Result<i64> {
+        let data = value.seal(key)?;
         let sql = format!(
             "INSERT INTO {} (id, revision, updated, deleted_at, data) VALUES (?1, 1, ?2, NULL, ?3)
              ON CONFLICT(id) DO UPDATE SET
@@ -285,11 +303,11 @@ impl Vault {
              RETURNING revision",
             T::TABLE
         );
-        Ok(self
-            .conn
-            .query_row(&sql, params![id.to_string(), now_ms(), data], |row| {
+        Ok(
+            conn.query_row(&sql, params![value.id().to_string(), now, data], |row| {
                 row.get(0)
-            })?)
+            })?,
+        )
     }
 
     fn get<T: Stored>(&self, id: Uuid) -> Result<Option<Record<T>>> {

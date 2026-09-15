@@ -3,9 +3,8 @@
 //! The vault key never changes. Adding a way in (a new device, a passkey) adds a slot,
 //! changing the master password rewrites one slot, and no entry is re-encrypted for either.
 
-use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 use crate::crypto::{self, KEY_LEN, KdfParams, Key, SALT_LEN};
 use crate::recovery::RecoveryKey;
@@ -136,9 +135,7 @@ fn aad(kind: SlotKind, id: Uuid) -> Vec<u8> {
 }
 
 fn password_kek(password: &str, kdf: &PasswordKdf) -> Result<Key> {
-    // RFC 8265 (OpaqueString): passwords are compared in Unicode NFC, so "é" typed as one
-    // code point on one keyboard and as "e" plus an accent on another opens the same vault.
-    let normalized: Zeroizing<String> = Zeroizing::new(password.nfc().collect());
+    let normalized = crate::password::normalize(password);
     let master = crypto::argon2id(normalized.as_bytes(), &kdf.salt, kdf.params)?;
     crypto::derive_key(master.as_bytes(), INFO_PASSWORD)
 }

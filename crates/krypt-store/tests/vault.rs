@@ -481,3 +481,29 @@ fn the_password_slot_reports_its_costs() {
     vault.change_password(PASSWORD, stronger).unwrap();
     assert_eq!(vault.password_kdf_params().unwrap(), Some(stronger));
 }
+
+#[test]
+fn many_records_are_written_in_one_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut vault, _) = new_vault(dir.path());
+    let github = Service::new("GitHub");
+    let groq = Service::new("Groq");
+    let items: Vec<Item> = (0..50)
+        .map(|i| api_key(&groq, &format!("key {i}"), &format!("gsk_{i}")))
+        .chain([login(&github, "you@example.com", "pw")])
+        .collect();
+    vault
+        .put_all(&[github.clone(), groq.clone()], &items)
+        .unwrap();
+    let path = vault.path().to_owned();
+    drop(vault);
+
+    let vault = LockedVault::open(&path)
+        .unwrap()
+        .unlock_with_password(PASSWORD)
+        .unwrap();
+    assert_eq!(vault.services().unwrap().len(), 2);
+    assert_eq!(vault.items().unwrap().len(), 51);
+    assert_eq!(vault.items_for_service(groq.id).unwrap().len(), 50);
+    assert_eq!(vault.items_for_service(github.id).unwrap().len(), 1);
+}

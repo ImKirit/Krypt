@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/krypt-core", "crates/krypt-store", "apps/desktop/src-tauri"]
+members = ["crates/krypt-core", "crates/krypt-store", "crates/krypt-import", "apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

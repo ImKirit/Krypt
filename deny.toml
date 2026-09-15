@@ -3,6 +3,9 @@
 
 [advisories]
 yanked = "deny"
+# Unmaintained crates deep inside Tauri's dependency tree cannot be swapped out from here.
+# Direct dependencies of Krypt's own crates still fail the check.
+unmaintained = "workspace"
 
 [licenses]
 allow = [
@@ -16,6 +19,19 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.9
+# Unmodified dependencies the list above does not cover. MPL-2.0 only asks that changes to
+# those files stay open; BSL-1.0 is permissive. Named one by one, so nothing new slips through.
+exceptions = [
+    # Tauri: CSS selector parsing in tauri-utils, and dirs.
+    { allow = ["MPL-2.0"], crate = "cssparser" },
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
+    { allow = ["MPL-2.0"], crate = "selectors" },
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+    # Clipboard access on Windows.
+    { allow = ["BSL-1.0"], crate = "clipboard-win" },
+    { allow = ["BSL-1.0"], crate = "error-code" },
+]
 
 [bans]
 multiple-versions = "warn"

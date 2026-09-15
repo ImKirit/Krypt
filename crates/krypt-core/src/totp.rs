@@ -73,6 +73,98 @@ impl TotpConfig {
             Err(Error::InvalidTotpSettings)
         }
     }
+
+    /// Reads an `otpauth://totp/Issuer:account?secret=...` link, the format setup pages put
+    /// into their QR codes. HOTP links are refused: Krypt keeps no counter.
+    pub fn from_uri(uri: &str) -> Result<Self> {
+        const PREFIX: &str = "otpauth://totp/";
+        let uri = uri.trim();
+        let rest = match uri.get(..PREFIX.len()) {
+            Some(scheme) if scheme.eq_ignore_ascii_case(PREFIX) => &uri[PREFIX.len()..],
+            _ => return Err(Error::InvalidTotpUri),
+        };
+        let (label, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let label = percent_decode(label)?;
+        let (issuer, account) = match label.split_once(':') {
+            Some((issuer, account)) => (non_empty(issuer), non_empty(account)),
+            None => (None, non_empty(&label)),
+        };
+        let mut config = Self {
+            issuer,
+            account,
+            ..Self::default()
+        };
+
+        let mut secret = None;
+        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+            let value = percent_decode(value)?;
+            match name.to_ascii_lowercase().as_str() {
+                "secret" => secret = Some(value),
+                // The parameter wins over the label, as in Google's key URI format.
+                "issuer" => {
+                    if let Some(issuer) = non_empty(&value) {
+                        config.issuer = Some(issuer);
+                    }
+                }
+                "algorithm" => {
+                    config.algorithm = match value.to_ascii_lowercase().as_str() {
+                        "sha1" => TotpAlgorithm::Sha1,
+                        "sha256" => TotpAlgorithm::Sha256,
+                        "sha512" => TotpAlgorithm::Sha512,
+                        _ => return Err(Error::InvalidTotpSettings),
+                    }
+                }
+                "digits" => {
+                    config.digits = value
+                        .trim()
+                        .parse()
+                        .map_err(|_| Error::InvalidTotpSettings)?
+                }
+                "period" => {
+                    config.period = value
+                        .trim()
+                        .parse()
+                        .map_err(|_| Error::InvalidTotpSettings)?
+                }
+                _ => {}
+            }
+        }
+
+        let secret = secret.ok_or(Error::InvalidTotpSecret)?;
+        decode_secret(&secret)?;
+        config.secret = Secret::new(secret.as_str());
+        config.check()?;
+        Ok(config)
+    }
+}
+
+fn non_empty(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Decodes `%XX` escapes. Anything that is not UTF-8 afterwards is refused.
+fn percent_decode(text: &str) -> Result<Zeroizing<String>> {
+    let bytes = text.as_bytes();
+    let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text
+                .get(i + 1..i + 3)
+                .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or(Error::InvalidTotpUri)?;
+            out.push(u8::from_str_radix(hex, 16).map_err(|_| Error::InvalidTotpUri)?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(std::mem::take(&mut *out))
+        .map(Zeroizing::new)
+        .map_err(|_| Error::InvalidTotpUri)
 }
 
 /// Decodes a Base32 secret as services print it: any case, spaces, dashes and padding allowed.
@@ -224,5 +316,75 @@ mod tests {
             decode_secret("not base32!").unwrap_err(),
             Error::InvalidTotpSecret
         );
+    }
+
+    #[test]
+    fn reads_otpauth_links() {
+        let config = TotpConfig::from_uri(
+            "otpauth://totp/ACME%20Co:jane%40example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ\
+             &issuer=ACME%20Co&algorithm=SHA256&digits=8&period=60",
+        )
+        .unwrap();
+        assert_eq!(config.secret.expose(), "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+        assert_eq!(config.issuer.as_deref(), Some("ACME Co"));
+        assert_eq!(config.account.as_deref(), Some("jane@example.com"));
+        assert_eq!(
+            (config.algorithm, config.digits, config.period),
+            (TotpAlgorithm::Sha256, 8, 60)
+        );
+
+        let minimal = TotpConfig::from_uri("OTPAUTH://TOTP/alice?secret=gezdgnbvgy3tqojq").unwrap();
+        assert_eq!(minimal.issuer, None);
+        assert_eq!(minimal.account.as_deref(), Some("alice"));
+        assert_eq!(
+            (minimal.algorithm, minimal.digits, minimal.period),
+            (TotpAlgorithm::Sha1, 6, 30)
+        );
+        assert!(minimal.code_at(59).is_ok());
+    }
+
+    #[test]
+    fn the_issuer_parameter_wins_over_the_label() {
+        let config =
+            TotpConfig::from_uri("otpauth://totp/Old:bob?issuer=New&secret=GEZDGNBVGY3TQOJQ")
+                .unwrap();
+        assert_eq!(config.issuer.as_deref(), Some("New"));
+        assert_eq!(config.account.as_deref(), Some("bob"));
+    }
+
+    #[test]
+    fn refuses_links_it_cannot_use() {
+        let cases = [
+            (
+                "otpauth://hotp/x?secret=GEZDGNBVGY3TQOJQ&counter=1",
+                Error::InvalidTotpUri,
+            ),
+            (
+                "https://example.com/?secret=GEZDGNBVGY3TQOJQ",
+                Error::InvalidTotpUri,
+            ),
+            ("otpauth://totp/x?issuer=y", Error::InvalidTotpSecret),
+            (
+                "otpauth://totp/x?secret=not-base32!",
+                Error::InvalidTotpSecret,
+            ),
+            (
+                "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&algorithm=MD5",
+                Error::InvalidTotpSettings,
+            ),
+            (
+                "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&digits=12",
+                Error::InvalidTotpSettings,
+            ),
+            (
+                "otpauth://totp/%zz?secret=GEZDGNBVGY3TQOJQ",
+                Error::InvalidTotpUri,
+            ),
+            ("otpauth://t\u{f6}tp", Error::InvalidTotpUri),
+            ("", Error::InvalidTotpUri),
+        ];
+        for (uri, expected) in cases {
+            assert_eq!(TotpConfig::from_uri(uri).unwrap_err(), expected, "{uri}");
+        }
     }
 }

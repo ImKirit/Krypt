@@ -8,8 +8,11 @@
 
 pub mod crypto;
 mod error;
+pub mod export;
+pub mod generator;
 pub mod keyslot;
 pub mod model;
+pub mod password;
 pub mod record;
 pub mod recovery;
 pub mod secret;

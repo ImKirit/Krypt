@@ -23,6 +23,14 @@ pub enum Error {
     InvalidTotpSecret,
     #[error("invalid TOTP settings")]
     InvalidTotpSettings,
+    #[error("invalid otpauth link")]
+    InvalidTotpUri,
+    #[error("the generator options cannot be met")]
+    GeneratorOptions,
+    #[error("not a Krypt export")]
+    NotAnExport,
+    #[error("unsupported export version {0}")]
+    ExportVersion(u32),
     // Deliberately without the serde message: it can quote the value that failed to parse.
     #[error("stored data has an unexpected format")]
     Format,
