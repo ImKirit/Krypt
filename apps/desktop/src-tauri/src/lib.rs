@@ -5,6 +5,7 @@
 
 mod backend;
 mod clipboard;
+mod dialogs;
 mod error;
 mod session;
 mod settings;
@@ -15,13 +16,17 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use krypt_core::crypto::KdfParams;
+use krypt_core::generator::GeneratorOptions;
 use krypt_core::model::{Item, ItemType, Service};
 use serde_json::Value;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::backend::{Backend, ItemSummary, ServiceSummary, Status, TotpNow};
+use crate::backend::{
+    Backend, GeneratedPassword, ImportPreview, ImportResult, ItemSummary, ServiceSummary, Status,
+    TotpNow,
+};
 use crate::error::{AppError, AppResult};
 use crate::settings::Settings;
 
@@ -204,6 +209,66 @@ fn save_settings(state: State<'_, AppState>, settings: Settings) -> AppResult<Se
     backend(&state).save_settings(settings)
 }
 
+#[tauri::command]
+fn generate_password(options: GeneratorOptions) -> AppResult<GeneratedPassword> {
+    Backend::generate(&options)
+}
+
+/// Asks where to save, then writes the encrypted export. Resolves to the file name, or to
+/// null when the dialog was cancelled.
+#[tauri::command]
+async fn export_vault(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    password: String,
+    title: String,
+) -> AppResult<Option<String>> {
+    let password = Zeroizing::new(password);
+    backend(&state).check_export(&password)?;
+    let suggested = format!("krypt-export-{}.json", backend::today());
+    let Some(path) = dialogs::save_path(&app, &window, &title, &suggested) else {
+        return Ok(None);
+    };
+    backend(&state).export_to(&path, &password)?;
+    Ok(Some(
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    ))
+}
+
+/// Asks for a file and prepares its import. Resolves to null when the dialog was cancelled.
+#[tauri::command]
+async fn import_pick(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    title: String,
+) -> AppResult<Option<ImportPreview>> {
+    backend(&state).ensure_unlocked()?;
+    let Some(path) = dialogs::open_path(&app, &window, &title) else {
+        return Ok(None);
+    };
+    backend(&state).import_open(path).map(Some)
+}
+
+#[tauri::command]
+async fn import_unlock(state: State<'_, AppState>, password: String) -> AppResult<ImportPreview> {
+    let password = Zeroizing::new(password);
+    backend(&state).import_unlock(&password)
+}
+
+#[tauri::command]
+async fn import_commit(state: State<'_, AppState>, delete_source: bool) -> AppResult<ImportResult> {
+    backend(&state).import_commit(delete_source)
+}
+
+#[tauri::command]
+fn import_cancel(state: State<'_, AppState>) {
+    backend(&state).import_cancel();
+}
+
 fn copy(text: &str, clear_after: Duration) -> AppResult<u64> {
     clipboard::copy_secret(text, clear_after).map_err(|_| AppError::new("clipboard"))?;
     Ok(clear_after.as_secs())
@@ -254,6 +319,9 @@ fn start_auto_lock(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Registered for the native dialogs Rust opens. The window's capabilities do not
+        // include the plugin, so the web view cannot open dialogs or see paths itself.
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = data_dir(app.handle())?;
             app.manage(Mutex::new(Backend::open(data_dir, KdfParams::DEFAULT)));
@@ -289,6 +357,12 @@ pub fn run() {
             copy_text,
             totp_now,
             save_settings,
+            generate_password,
+            export_vault,
+            import_pick,
+            import_unlock,
+            import_commit,
+            import_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Krypt");

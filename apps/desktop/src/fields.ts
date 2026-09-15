@@ -21,6 +21,8 @@ export interface FieldDef {
   monospace?: boolean;
   readOnly?: boolean;
   options?: string[];
+  /** Offers the password generator next to the field. */
+  generate?: boolean;
 }
 
 /** The flat fields of every entry type, in the order they are shown and edited. */
@@ -28,7 +30,7 @@ export const FIELDS: Record<ItemType, FieldDef[]> = {
   login: [
     { key: "username", label: "field.username", kind: "text", nullable: true },
     { key: "email", label: "field.email", kind: "text", nullable: true },
-    { key: "password", label: "field.password", kind: "secret", monospace: true },
+    { key: "password", label: "field.password", kind: "secret", monospace: true, generate: true },
     { key: "urls", label: "field.urls", kind: "lines" },
   ],
   api_key: [
@@ -89,7 +91,7 @@ export const FIELDS: Record<ItemType, FieldDef[]> = {
     { key: "port", label: "field.port", kind: "number", nullable: true },
     { key: "database", label: "field.database", kind: "text", nullable: true },
     { key: "username", label: "field.username", kind: "text", nullable: true },
-    { key: "password", label: "field.password", kind: "secret", nullable: true, monospace: true },
+    { key: "password", label: "field.password", kind: "secret", nullable: true, monospace: true, generate: true },
     { key: "connection_string", label: "field.connection_string", kind: "secret", nullable: true, monospace: true },
   ],
 };

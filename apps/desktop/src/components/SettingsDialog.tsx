@@ -2,9 +2,17 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { api } from "../api";
 import { errorText, useT } from "../i18n";
+import { rulesMet } from "../rules";
 import { RecoveryKeyPanel } from "../screens/Gate";
 import type { Settings, Status } from "../types";
-import { Button, ConfirmDialog, Modal, SecretField, StrengthMeter } from "../ui";
+import {
+  Button,
+  ConfirmDialog,
+  Modal,
+  PasswordChecklist,
+  SecretField,
+  StrengthMeter,
+} from "../ui";
 
 const AUTO_LOCK = [1, 5, 15, 30, 60, 0];
 const CLIPBOARD = [10, 30, 60, 120];
@@ -13,10 +21,14 @@ export function SettingsDialog({
   status,
   onStatus,
   onClose,
+  onImport,
+  onExport,
 }: {
   status: Status;
   onStatus: (status: Status) => void;
   onClose: () => void;
+  onImport: () => void;
+  onExport: () => void;
 }) {
   const { t } = useT();
   const settings = status.settings;
@@ -67,7 +79,7 @@ export function SettingsDialog({
     }
   };
 
-  const ready = current.length > 0 && [...next].length >= min && next === confirm;
+  const ready = current.length > 0 && rulesMet(next, min) && next === confirm;
 
   return (
     <Modal
@@ -149,6 +161,21 @@ export function SettingsDialog({
         </section>
 
         <section className="settings-section">
+          <div className="section-label">{t("settings.data")}</div>
+          <div className="row-between">
+            <p className="hint">{t("settings.dataLead")}</p>
+            <div className="row-end">
+              <Button icon="import" id="settings-import" onClick={onImport}>
+                {t("settings.import")}
+              </Button>
+              <Button icon="export" id="settings-export" onClick={onExport}>
+                {t("settings.export")}
+              </Button>
+            </div>
+          </div>
+        </section>
+
+        <section className="settings-section">
           <div className="section-label">{t("settings.password")}</div>
           <form className="grid-3" onSubmit={changePassword}>
             <SecretField id="settings-current" label={t("settings.current")} value={current} onChange={setCurrent} mono={false} />
@@ -157,6 +184,11 @@ export function SettingsDialog({
               <StrengthMeter password={next} />
             </div>
             <SecretField id="settings-confirm" label={t("settings.confirm")} value={confirm} onChange={setConfirm} mono={false} />
+            {next && (
+              <div className="span-3">
+                <PasswordChecklist id="settings-rules" password={next} minChars={min} />
+              </div>
+            )}
             <div className="span-3 row-end">
               {passwordMessage && <p className="hint">{passwordMessage}</p>}
               <Button type="submit" variant="primary" disabled={!ready || busy}>

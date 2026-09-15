@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { ExportDialog } from "../components/ExportDialog";
+import { ImportDialog } from "../components/ImportDialog";
 import { ItemDetail } from "../components/ItemDetail";
 import { ItemEditor } from "../components/ItemEditor";
 import { ServiceEditor } from "../components/ServiceEditor";
@@ -60,6 +62,8 @@ export function Main({
   const [editor, setEditor] = useState<{ item: Item; isNew: boolean } | null>(null);
   const [serviceEdit, setServiceEdit] = useState<Service | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [version, setVersion] = useState(0);
 
@@ -141,7 +145,13 @@ export function Main({
     }
   };
 
-  const dialogOpen = editor !== null || serviceEdit !== null || settingsOpen || confirmEmpty;
+  const dialogOpen =
+    editor !== null ||
+    serviceEdit !== null ||
+    settingsOpen ||
+    importOpen ||
+    exportOpen ||
+    confirmEmpty;
 
   // Ctrl+F search, Ctrl+N new entry, Ctrl+L lock. The web view's own meaning of these keys
   // (find bar, new window) is suppressed.
@@ -300,6 +310,16 @@ export function Main({
               <>
                 <p className="strong">{t("list.empty")}</p>
                 <p>{t("list.emptyHint")}</p>
+                {items.length === 0 && (
+                  <Button
+                    icon="import"
+                    id="empty-import"
+                    className="list-empty-action"
+                    onClick={() => setImportOpen(true)}
+                  >
+                    {t("import.fromOther")}
+                  </Button>
+                )}
               </>
             )}
           </div>
@@ -353,7 +373,34 @@ export function Main({
         />
       )}
       {settingsOpen && (
-        <SettingsDialog status={status} onStatus={onStatus} onClose={() => setSettingsOpen(false)} />
+        <SettingsDialog
+          status={status}
+          onStatus={onStatus}
+          onClose={() => setSettingsOpen(false)}
+          onImport={() => {
+            setSettingsOpen(false);
+            setImportOpen(true);
+          }}
+          onExport={() => {
+            setSettingsOpen(false);
+            setExportOpen(true);
+          }}
+        />
+      )}
+      {importOpen && (
+        <ImportDialog
+          onClose={() => setImportOpen(false)}
+          onImported={async (result) => {
+            setImportOpen(false);
+            const done = t("import.done", { n: result.items });
+            toast(result.source_deleted ? `${done} ${t("import.deleted")}` : done);
+            go({ kind: "all" });
+            await afterChange();
+          }}
+        />
+      )}
+      {exportOpen && (
+        <ExportDialog minChars={status.min_password_chars} onClose={() => setExportOpen(false)} />
       )}
       {confirmEmpty && (
         <ConfirmDialog

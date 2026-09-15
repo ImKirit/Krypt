@@ -1,12 +1,21 @@
 // Drives a debug build of Krypt through the DevTools protocol of WebView2: creates a vault,
-// adds entries, checks copying, search, trash and locking, and saves screenshots to
-// scripts/out. Uses a throwaway data folder, so a real vault is never touched.
+// adds entries, checks copying, search, trash, the generator, export, import and locking, and
+// saves screenshots to scripts/out. Uses a throwaway data folder, so a real vault is never
+// touched.
 //
 //   npm run tauri build -- --debug --no-bundle
 //   node scripts/drive.mjs <path to krypt.exe> [--auto-lock] [--theme=light|dark]
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,14 +32,20 @@ const here = dirname(fileURLToPath(import.meta.url));
 const outDir = join(here, "out");
 mkdirSync(outDir, { recursive: true });
 const dataDir = mkdtempSync(join(tmpdir(), "krypt-drive-"));
+const exportPath = join(dataDir, "export.json");
+const importPath = join(dataDir, "Chrome Passwords.csv");
 const port = 9333;
-const PASSWORD = "correct horse battery staple";
+const PASSWORD = "Correct-horse-battery-7";
+const EXPORT_PASSWORD = "Export-pass-2026";
 const results = [];
 
 const app = spawn(exe, [], {
   env: {
     ...process.env,
     KRYPT_DATA_DIR: dataDir,
+    // Native file dialogs cannot be clicked through; debug builds take these paths instead.
+    KRYPT_TEST_SAVE_PATH: exportPath,
+    KRYPT_TEST_OPEN_PATH: importPath,
     // Keep going if the screen of this machine locks during the run.
     KRYPT_IGNORE_SESSION_LOCK: "1",
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
@@ -150,6 +165,9 @@ async function click(selector) {
   await sleep(120);
 }
 
+const text = (selector) => js(`document.querySelector(${q(selector)})?.textContent ?? ""`);
+const rowCount = () => js(`document.querySelectorAll("#item-list .row").length`);
+
 async function clickRow(...texts) {
   await js(`[...document.querySelectorAll("#item-list .row")]
     .find((row) => ${JSON.stringify(texts)}.every((text) => row.textContent.includes(text)))
@@ -200,6 +218,13 @@ async function addEntry({ type, service, newService, label, fields = {}, totp, c
   await waitGone("#item-editor");
 }
 
+async function openFromSettings(button, dialog) {
+  await click("#nav-settings");
+  await click(button);
+  await waitGone("#settings");
+  await waitFor(dialog);
+}
+
 try {
   cdp = await connect((await findPage()).webSocketDebuggerUrl);
   await cdp.send("Runtime.enable");
@@ -213,12 +238,25 @@ try {
   await waitFor("#setup");
   check("a fresh start shows the setup", true);
   await fill("#setup-password", "short");
+  await fill("#setup-confirm", "short");
   check(
     "a short password cannot create a vault",
     await js(`document.querySelector("#setup-create").disabled`),
   );
+  await fill("#setup-password", "longpassword");
+  await fill("#setup-confirm", "longpassword");
+  const metForLong = await js(`document.querySelectorAll("#setup-rules li.met").length`);
+  check(
+    "a long password without the other rules cannot create a vault either",
+    metForLong === 2 && (await js(`document.querySelector("#setup-create").disabled`)),
+    `${metForLong} of 5 rules met`,
+  );
   await fill("#setup-password", PASSWORD);
   await fill("#setup-confirm", PASSWORD);
+  check(
+    "the checklist ticks every rule for a good password",
+    (await js(`document.querySelectorAll("#setup-rules li.met").length`)) === 5,
+  );
   await shot("tour-1-setup");
   await click("#setup-create");
   await waitFor("#recovery-screen", 30000);
@@ -231,6 +269,7 @@ try {
   await click("#recovery-saved");
   await click("#recovery-done");
   await waitFor("#new-item");
+  check("an empty vault offers to import", await js(`!!document.querySelector("#empty-import")`));
 
   // English screenshots, short clipboard timer for the copy check
   await click("#nav-settings");
@@ -284,8 +323,8 @@ try {
     fields: { "#field-comment": "laptop@home", "#field-private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\nexample\n-----END OPENSSH PRIVATE KEY-----" },
   });
 
-  const rowCount = await js(`document.querySelectorAll("#item-list .row").length`);
-  check("eight entries are listed", rowCount === 8, `${rowCount} rows`);
+  const listed = await rowCount();
+  check("eight entries are listed", listed === 8, `${listed} rows`);
   const services = await js(`[...document.querySelectorAll("#nav-services .nav-item")].map((b) => b.textContent)`);
   check("three services with counts", services.join("|") === "Anthropic3|GitHub2|Groq2", services.join("|"));
 
@@ -333,7 +372,7 @@ try {
   await shot("main-service");
   await click("#nav-all");
   await fill("#search", "groq");
-  const found = await js(`document.querySelectorAll("#item-list .row").length`);
+  const found = await rowCount();
   check("search finds the two Groq keys", found === 2, `${found} rows`);
   await fill("#search", "");
 
@@ -362,17 +401,48 @@ try {
   await click("#confirm-yes");
   await waitGone("#item-editor");
 
+  // Generator. Its settings survive between runs in the web view's storage, so set them first.
+  await click("#new-item");
+  await waitFor("#item-editor");
+  await click("#field-password-generate");
+  await waitFor("#generator");
+  await click("#generator-kind-password");
+  await fill("#generator-length", "20");
+  const generatedPassword = await waitUntil(
+    `document.querySelector("#generator-value")?.textContent ?? ""`,
+    (value) => value.length === 20,
+  );
+  check("the generator makes a password of the chosen length", generatedPassword.length === 20, `${generatedPassword.length} chars`);
+  await click("#generator-kind-passphrase");
+  const phrase = await waitUntil(
+    `document.querySelector("#generator-value")?.textContent ?? ""`,
+    (value) => value !== generatedPassword && /^[A-Z]/.test(value) && /\d/.test(value),
+  );
+  check("the generator switches to a passphrase", /^[A-Z]/.test(phrase) && /\d/.test(phrase), phrase.replace(/[a-z]/g, "x"));
+  await js(`document.querySelector("#generator").scrollIntoView({ block: "end" })`);
+  await shot("generator");
+  await click("#generator-use");
+  await waitGone("#generator");
+  check(
+    "using a generated passphrase fills the password field",
+    (await js(`document.querySelector("#field-password").value`)) === phrase,
+  );
+  await click("#item-editor .dialog-head .icon-btn");
+  await waitFor("#confirm");
+  await click("#confirm-yes");
+  await waitGone("#item-editor");
+
   // Trash
   await clickRow("Laptop", "laptop@home");
   await click("#trash-item");
   await sleep(300);
-  check("trashing removes the entry from the list", (await js(`document.querySelectorAll("#item-list .row").length`)) === 7);
+  check("trashing removes the entry from the list", (await rowCount()) === 7);
   await click("#nav-trash");
   await clickRow("laptop@home");
   await click("#restore-item");
   await sleep(300);
   await click("#nav-all");
-  check("restoring brings it back", (await js(`document.querySelectorAll("#item-list .row").length`)) === 8);
+  check("restoring brings it back", (await rowCount()) === 8);
 
   // Settings screenshot
   await click("#nav-settings");
@@ -400,12 +470,70 @@ try {
   await fill("#unlock-password", PASSWORD);
   await click("#unlock-button");
   await waitFor("#new-item", 30000);
-  const rowsAfterUnlock = await waitUntil(
-    `document.querySelectorAll("#item-list .row").length`,
-    (count) => count === 8,
-  );
+  const rowsAfterUnlock = await waitUntil(`document.querySelectorAll("#item-list .row").length`, (count) => count === 8);
   check("the right password opens the vault again", rowsAfterUnlock === 8, `${rowsAfterUnlock} rows`);
   if (rowsAfterUnlock !== 8) await shot("failure-after-unlock");
+
+  // Encrypted export
+  await openFromSettings("#settings-export", "#export");
+  await fill("#export-password", "weakpassword");
+  await fill("#export-confirm", "weakpassword");
+  check("a weak export password is refused", await js(`document.querySelector("#export-save").disabled`));
+  await fill("#export-password", EXPORT_PASSWORD);
+  await fill("#export-confirm", EXPORT_PASSWORD);
+  await shot("export");
+  await click("#export-save");
+  await waitGone("#export", 30000);
+  const exported = existsSync(exportPath) ? readFileSync(exportPath, "utf8") : "";
+  check(
+    "the export is written and nothing in it is readable",
+    exported.includes('"krypt-export"') && !exported.includes("hunter2") && !exported.includes("Anthropic"),
+    `${exported.length} bytes`,
+  );
+
+  // Import of a browser CSV: one duplicate, one entry for an existing service, one new service
+  writeFileSync(
+    importPath,
+    [
+      "name,url,username,password,note",
+      "github.com,https://github.com/,octo-example,a-long-github-password,",
+      "Example,https://login.example.org/,demo,demo-password,",
+      "console.anthropic.com,https://console.anthropic.com/,work@example.com,another-anthropic-password,",
+    ].join("\n") + "\n",
+  );
+  // The export's toast would end up in the screenshot.
+  await waitGone("#toast", 8000);
+  await openFromSettings("#settings-import", "#import");
+  await click("#import-pick");
+  await waitFor("#import-preview", 30000);
+  const total = await text("#import-total");
+  const duplicates = await text("#import-duplicates");
+  check("the import preview counts new entries and duplicates", total.includes("2") && duplicates.includes("1"), `${total} / ${duplicates}`);
+  check("the preview names the new service", (await text("#import-new-services")).includes("Example"));
+  check("the preview names the existing service", (await text("#import-existing-services")).includes("Anthropic"));
+  await shot("import-preview");
+  await click("#import-delete");
+  await click("#import-commit");
+  await waitGone("#import", 30000);
+  const afterImport = await waitUntil(`document.querySelectorAll("#item-list .row").length`, (count) => count === 10);
+  check("importing adds the two new entries", afterImport === 10, `${afterImport} rows`);
+  check("the plain text export file is deleted when asked", !existsSync(importPath));
+
+  // Importing the encrypted export back into the same vault finds nothing new
+  copyFileSync(exportPath, importPath);
+  await openFromSettings("#settings-import", "#import");
+  await click("#import-pick");
+  await waitFor("#import-password", 30000);
+  await fill("#import-password", "Wrong-password-1");
+  await click("#import-unlock");
+  await waitFor("#import .error", 30000);
+  check("a wrong export password is refused on import", true);
+  await fill("#import-password", EXPORT_PASSWORD);
+  await click("#import-unlock");
+  await waitFor("#import-nothing", 30000);
+  check("importing the export again finds nothing new", true);
+  await click("#import .dialog-head .icon-btn");
+  await waitGone("#import");
 
   if (checkAutoLock) {
     await click("#nav-settings");

@@ -50,11 +50,37 @@ impl From<krypt_core::Error> for AppError {
     }
 }
 
+impl From<krypt_import::Error> for AppError {
+    fn from(error: krypt_import::Error) -> Self {
+        use krypt_core::Error as Core;
+        use krypt_import::Error as E;
+        let code = match &error {
+            E::UnknownFormat => "import_unknown_format",
+            E::Encrypted => "import_encrypted",
+            E::PasswordRequired => "import_password_required",
+            // Wrong password and damaged file cannot be told apart.
+            E::Core(Core::Decrypt) => "import_wrong_password",
+            E::Malformed
+            | E::Core(
+                Core::Format | Core::Truncated | Core::UnsupportedVersion(_) | Core::KdfParams,
+            ) => "import_malformed",
+            E::Core(core) => core_code(core),
+        };
+        Self {
+            code,
+            message: error.to_string(),
+        }
+    }
+}
+
 fn core_code(error: &krypt_core::Error) -> &'static str {
     use krypt_core::Error as E;
     match error {
         E::InvalidRecoveryKey => "invalid_recovery_key",
-        E::InvalidTotpSecret | E::InvalidTotpSettings => "invalid_totp",
+        E::InvalidTotpSecret | E::InvalidTotpSettings | E::InvalidTotpUri => "invalid_totp",
+        E::GeneratorOptions => "generator_options",
+        E::NotAnExport => "import_unknown_format",
+        E::ExportVersion(_) => "export_version",
         E::Decrypt | E::Truncated | E::UnsupportedVersion(_) | E::Format | E::KdfParams => {
             "corrupt"
         }

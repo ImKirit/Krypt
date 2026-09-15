@@ -3,6 +3,7 @@ import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { Icon, LogoMark } from "./icons";
 import { useT } from "./i18n";
 import type { Key } from "./i18n";
+import { RULES, checkRules } from "./rules";
 import { estimateStrength } from "./strength";
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -121,16 +122,18 @@ export function SecretField({
   mono = true,
   autoFocus,
   disabled,
-}: Omit<TextFieldProps, "type" | "placeholder" | "rows">) {
+  onGenerate,
+}: Omit<TextFieldProps, "type" | "placeholder" | "rows"> & { onGenerate?: () => void }) {
   const { t } = useT();
   const autoId = useId();
   const inputId = id ?? autoId;
   const [shown, setShown] = useState(false);
+  const generate = onGenerate && !disabled && !multiline;
   const className = `input ${mono ? "mono" : ""} ${!shown && multiline ? "concealed" : ""}`;
   return (
     <div className="form-field">
       <label htmlFor={inputId}>{label}</label>
-      <div className={`input-wrap ${multiline ? "multi" : ""}`}>
+      <div className={`input-wrap ${multiline ? "multi" : ""} ${generate ? "with-generate" : ""}`}>
         {multiline ? (
           <textarea
             id={inputId}
@@ -153,6 +156,15 @@ export function SecretField({
             autoComplete="off"
             autoFocus={autoFocus}
             onChange={(event) => onChange(event.target.value)}
+          />
+        )}
+        {generate && (
+          <IconButton
+            id={`${inputId}-generate`}
+            className="generate"
+            icon="dice"
+            label={t("generator.open")}
+            onClick={onGenerate}
           />
         )}
         <IconButton
@@ -179,6 +191,30 @@ export function StrengthMeter({ password }: { password: string }) {
       </div>
       <span className="strength-text">{password ? t(`strength.${score}` as Key) : ""}</span>
     </div>
+  );
+}
+
+/** The rules a new master or export password has to meet, ticked off while typing. */
+export function PasswordChecklist({
+  password,
+  minChars,
+  id,
+}: {
+  password: string;
+  minChars: number;
+  id?: string;
+}) {
+  const { t } = useT();
+  const state = checkRules(password, minChars);
+  return (
+    <ul className="rules" id={id} aria-label={t("rules.title")}>
+      {RULES.map((rule) => (
+        <li key={rule} className={state[rule] ? "met" : ""} data-rule={rule}>
+          <Icon name={state[rule] ? "check" : "circle"} size={14} />
+          <span>{t(`rules.${rule}` as Key, { n: minChars })}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
 

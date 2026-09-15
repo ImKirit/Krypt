@@ -1,14 +1,20 @@
 //! Everything the window can ask for, kept free of Tauri so it can be tested directly.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use krypt_core::crypto::KdfParams;
+use krypt_core::export::{self, ExportPayload};
+use krypt_core::generator::{self, GeneratorOptions};
 use krypt_core::model::{Item, ItemData, ItemType, PasswordChange, Service};
+use krypt_core::password::{MIN_CHARS as MIN_PASSWORD_CHARS, PasswordRules};
 use krypt_core::recovery::RecoveryKey;
-use krypt_core::secret::{self, MASKED};
+use krypt_core::secret::{self, MASKED, Secret};
 use krypt_core::totp::TotpConfig;
+use krypt_import::{Plan, Source};
 use krypt_store::{BackupRetention, LockedVault, Record, Vault};
 use serde::Serialize;
 use serde_json::Value;
@@ -18,14 +24,14 @@ use zeroize::Zeroizing;
 use crate::error::{AppError, AppResult};
 use crate::settings::Settings;
 
-/// Shortest master password the app accepts.
-pub const MIN_PASSWORD_CHARS: usize = 12;
 const PASSWORD_HISTORY_KEPT: usize = 20;
 /// The ten newest copies, plus the newest copy of each of the last eight weeks.
 const BACKUPS: BackupRetention = BackupRetention {
     recent: 10,
     weeks: 8,
 };
+/// Anything larger is no export.
+const MAX_IMPORT_BYTES: u64 = 64 * 1024 * 1024;
 
 enum VaultSlot {
     Missing,
@@ -44,6 +50,7 @@ pub struct Backend {
     last_activity: Instant,
     backed_up: bool,
     backup_failed: bool,
+    pending_import: Option<PendingImport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -89,6 +96,49 @@ pub struct TotpNow {
     pub period: u32,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GeneratedPassword {
+    pub value: Secret,
+    pub bits: u32,
+}
+
+/// What an import is about to do. Names and counts only, never a secret.
+#[derive(Debug, Default, Serialize)]
+pub struct ImportPreview {
+    pub file_name: String,
+    /// A Krypt export that waits for its password; nothing else is filled in yet.
+    pub needs_password: bool,
+    pub source: Option<Source>,
+    pub counts: Vec<TypeCount>,
+    pub total: usize,
+    pub new_services: Vec<String>,
+    pub existing_services: Vec<String>,
+    pub duplicates: usize,
+    pub skipped: usize,
+    /// Exports of other apps hold every password unencrypted.
+    pub plaintext: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TypeCount {
+    pub item_type: ItemType,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportResult {
+    pub items: usize,
+    pub services: usize,
+    pub source_deleted: bool,
+}
+
+struct PendingImport {
+    path: PathBuf,
+    file_name: String,
+    /// Empty until the password of a Krypt export is known.
+    plan: Option<(Source, Plan)>,
+}
+
 impl Backend {
     pub fn open(data_dir: PathBuf, kdf: KdfParams) -> Self {
         let settings = Settings::load(&data_dir);
@@ -110,6 +160,7 @@ impl Backend {
             last_activity: Instant::now(),
             backed_up: false,
             backup_failed: false,
+            pending_import: None,
         }
     }
 
@@ -126,7 +177,7 @@ impl Backend {
 
     /// Creates the vault and returns the recovery key, formatted to be shown once.
     pub fn create_vault(&mut self, password: &str) -> AppResult<Zeroizing<String>> {
-        check_length(password)?;
+        check_password_rules(password)?;
         if !matches!(self.slot, VaultSlot::Missing) || self.problem.is_some() {
             return Err(AppError::new("vault_exists"));
         }
@@ -157,7 +208,7 @@ impl Backend {
 
     /// Opens the vault with the recovery key and sets a new master password.
     pub fn recover(&mut self, recovery_key: &str, new_password: &str) -> AppResult<()> {
-        check_length(new_password)?;
+        check_password_rules(new_password)?;
         let key = RecoveryKey::parse(recovery_key)?;
         let locked = self.take_locked()?;
         match locked.unlock_with_recovery_key(&key) {
@@ -176,6 +227,8 @@ impl Backend {
 
     /// Returns true if the vault was unlocked and is locked now.
     pub fn lock(&mut self) -> bool {
+        // A prepared import holds decrypted entries.
+        self.pending_import = None;
         match std::mem::replace(&mut self.slot, VaultSlot::Busy) {
             VaultSlot::Unlocked(vault) => {
                 self.slot = VaultSlot::Locked(vault.lock());
@@ -203,7 +256,7 @@ impl Backend {
     }
 
     pub fn change_password(&mut self, current: &str, new_password: &str) -> AppResult<()> {
-        check_length(new_password)?;
+        check_password_rules(new_password)?;
         self.touch();
         let kdf = self.kdf;
         let vault = self.vault_mut()?;
@@ -220,6 +273,10 @@ impl Backend {
             .vault_mut()?
             .replace_recovery_key()?
             .to_display_string())
+    }
+
+    pub fn ensure_unlocked(&self) -> AppResult<()> {
+        self.vault().map(|_| ())
     }
 
     pub fn services(&self) -> AppResult<Vec<ServiceSummary>> {
@@ -413,6 +470,113 @@ impl Backend {
         })
     }
 
+    /// A random password or passphrase. Needs no vault.
+    pub fn generate(options: &GeneratorOptions) -> AppResult<GeneratedPassword> {
+        let generated = generator::generate(options)?;
+        Ok(GeneratedPassword {
+            value: generated.value,
+            bits: generated.bits,
+        })
+    }
+
+    /// Checks what an export needs before the save dialog opens, so a weak password is
+    /// reported first.
+    pub fn check_export(&self, password: &str) -> AppResult<()> {
+        self.vault()?;
+        check_password_rules(password)
+    }
+
+    /// Writes every service and every entry outside the trash into an encrypted export.
+    pub fn export_to(&mut self, path: &Path, password: &str) -> AppResult<()> {
+        check_password_rules(password)?;
+        self.touch();
+        let vault = self.vault()?;
+        let payload = ExportPayload {
+            exported_at: now_ms(),
+            services: vault
+                .services()?
+                .into_iter()
+                .map(|record| record.value)
+                .collect(),
+            items: vault
+                .items()?
+                .into_iter()
+                .map(|record| record.value)
+                .collect(),
+        };
+        let sealed = export::seal(&payload, password, self.kdf)?;
+        write_replacing(path, &sealed)
+    }
+
+    /// Reads a file chosen for import and works out what it would add. A Krypt export waits
+    /// for its password in [`Backend::import_unlock`].
+    pub fn import_open(&mut self, path: PathBuf) -> AppResult<ImportPreview> {
+        self.touch();
+        self.pending_import = None;
+        self.vault()?;
+        let bytes = read_import(&path)?;
+        let plan = if krypt_import::needs_password(&bytes) {
+            None
+        } else {
+            Some(self.plan_import(&bytes, None)?)
+        };
+        let pending = PendingImport {
+            file_name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path,
+            plan,
+        };
+        let preview = pending.preview();
+        self.pending_import = Some(pending);
+        Ok(preview)
+    }
+
+    pub fn import_unlock(&mut self, password: &str) -> AppResult<ImportPreview> {
+        self.touch();
+        let path = match &self.pending_import {
+            Some(pending) => pending.path.clone(),
+            None => return Err(AppError::new("no_import")),
+        };
+        let bytes = read_import(&path)?;
+        let plan = self.plan_import(&bytes, Some(password))?;
+        let pending = self
+            .pending_import
+            .as_mut()
+            .ok_or_else(|| AppError::new("no_import"))?;
+        pending.plan = Some(plan);
+        Ok(pending.preview())
+    }
+
+    /// Writes the prepared import in one transaction, after a backup of the vault.
+    pub fn import_commit(&mut self, delete_source: bool) -> AppResult<ImportResult> {
+        self.touch();
+        let Some(PendingImport {
+            path,
+            plan: Some((source, plan)),
+            ..
+        }) = self.pending_import.take()
+        else {
+            return Err(AppError::new("no_import"));
+        };
+        let vault = self.vault_mut()?;
+        // Hundreds of new entries are easier to undo from a copy than one by one.
+        let _ = vault.create_backup(BACKUPS);
+        vault.put_all(&plan.new_services, &plan.items)?;
+        let source_deleted =
+            delete_source && source != Source::Krypt && fs::remove_file(&path).is_ok();
+        Ok(ImportResult {
+            items: plan.items.len(),
+            services: plan.new_services.len(),
+            source_deleted,
+        })
+    }
+
+    pub fn import_cancel(&mut self) {
+        self.pending_import = None;
+    }
+
     pub fn clipboard_clear_after(&self) -> Duration {
         Duration::from_secs(u64::from(self.settings.clipboard_clear_seconds))
     }
@@ -438,6 +602,27 @@ impl Backend {
         {
             let _ = vault.change_password(password, self.kdf);
         }
+    }
+
+    fn plan_import(&self, bytes: &[u8], password: Option<&str>) -> AppResult<(Source, Plan)> {
+        let parsed = krypt_import::parse(bytes, password)?;
+        let source = parsed.source;
+        let vault = self.vault()?;
+        let services: Vec<Service> = vault
+            .services()?
+            .into_iter()
+            .map(|record| record.value)
+            .collect();
+        let items: Vec<Item> = vault
+            .items()?
+            .into_iter()
+            .map(|record| record.value)
+            .collect();
+        let plan = krypt_import::plan(parsed, &services, &items);
+        if plan.items.is_empty() && plan.duplicates == 0 {
+            return Err(AppError::new("import_empty"));
+        }
+        Ok((source, plan))
     }
 
     fn take_locked(&mut self) -> AppResult<LockedVault> {
@@ -499,6 +684,46 @@ impl Backend {
     }
 }
 
+impl PendingImport {
+    fn preview(&self) -> ImportPreview {
+        let Some((source, plan)) = &self.plan else {
+            return ImportPreview {
+                file_name: self.file_name.clone(),
+                needs_password: true,
+                ..ImportPreview::default()
+            };
+        };
+        let mut new_services: Vec<String> = plan
+            .new_services
+            .iter()
+            .map(|service| service.name.clone())
+            .collect();
+        new_services.sort_by_key(|name| name.to_lowercase());
+        ImportPreview {
+            file_name: self.file_name.clone(),
+            needs_password: false,
+            source: Some(*source),
+            counts: ItemType::ALL
+                .iter()
+                .filter_map(|&item_type| {
+                    let count = plan
+                        .items
+                        .iter()
+                        .filter(|item| item.item_type() == item_type)
+                        .count();
+                    (count > 0).then_some(TypeCount { item_type, count })
+                })
+                .collect(),
+            total: plan.items.len(),
+            new_services,
+            existing_services: plan.existing_services.clone(),
+            duplicates: plan.duplicates,
+            skipped: plan.skipped,
+            plaintext: *source != Source::Krypt,
+        }
+    }
+}
+
 pub fn vault_path(data_dir: &Path) -> PathBuf {
     data_dir.join("vault.db")
 }
@@ -508,6 +733,30 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+/// Today in UTC as `YYYY-MM-DD`, for file names.
+pub fn today() -> String {
+    date_from_days(now_ms().div_euclid(86_400_000))
+}
+
+/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 to a calendar date.
+fn date_from_days(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn unix_seconds() -> u64 {
@@ -525,12 +774,46 @@ fn is_weaker(current: KdfParams, target: KdfParams) -> bool {
         && (current.m_cost_kib, current.t_cost) != (target.m_cost_kib, target.t_cost)
 }
 
-fn check_length(password: &str) -> AppResult<()> {
-    if password.chars().count() < MIN_PASSWORD_CHARS {
-        Err(AppError::new("password_too_short"))
-    } else {
+/// New master and export passwords must meet every rule. Passwords set before the rules
+/// existed keep working.
+fn check_password_rules(password: &str) -> AppResult<()> {
+    if PasswordRules::check(password).all_met() {
         Ok(())
+    } else {
+        Err(AppError::new("password_rules"))
     }
+}
+
+fn read_import(path: &Path) -> AppResult<Zeroizing<Vec<u8>>> {
+    let size = fs::metadata(path).map_err(|_| AppError::new("io"))?.len();
+    if size > MAX_IMPORT_BYTES {
+        return Err(AppError::new("import_too_large"));
+    }
+    fs::read(path)
+        .map(Zeroizing::new)
+        .map_err(|_| AppError::new("io"))
+}
+
+/// Writes next to `path` first and then moves the file into place, so an interrupted write
+/// never leaves half a file under the chosen name.
+fn write_replacing(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    let mut partial_name = path
+        .file_name()
+        .ok_or_else(|| AppError::new("io"))?
+        .to_owned();
+    partial_name.push(".partial");
+    let partial = path.with_file_name(partial_name);
+    let written = (|| {
+        let mut file = fs::File::create(&partial)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&partial, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    written.map_err(|_| AppError::new("io"))
 }
 
 fn found(changed: bool) -> AppResult<()> {
@@ -606,7 +889,6 @@ fn subtitle(data: &ItemData) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use krypt_core::model::{ApiKey, DomainRule, Login};
-    use krypt_core::secret::Secret;
 
     use super::*;
 
@@ -615,7 +897,10 @@ mod tests {
         t_cost: 1,
         p_cost: 1,
     };
-    const PASSWORD: &str = "correct horse battery";
+    const PASSWORD: &str = "Correct-horse-battery-1";
+    const NEW_PASSWORD: &str = "A-brand-new-password-2";
+    const OTHER_PASSWORD: &str = "Another-good-password-3";
+    const EXPORT_PASSWORD: &str = "Export-password-4";
 
     fn unlocked() -> (tempfile::TempDir, Backend) {
         let dir = tempfile::tempdir().unwrap();
@@ -632,6 +917,12 @@ mod tests {
             login.password = Secret::new(password);
         }
         item
+    }
+
+    fn csv_file(dir: &Path, text: &str) -> PathBuf {
+        let path = dir.join("passwords.csv");
+        fs::write(&path, text).unwrap();
+        path
     }
 
     #[test]
@@ -695,10 +986,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut backend = Backend::open(dir.path().to_owned(), FAST);
         assert!(!backend.status().vault_exists);
-        assert_eq!(
-            backend.create_vault("short").unwrap_err().code,
-            "password_too_short"
-        );
+        for weak in [
+            "short",
+            "long but no rules",
+            "Nodigits-here",
+            "n0-upper-case",
+        ] {
+            assert_eq!(
+                backend.create_vault(weak).unwrap_err().code,
+                "password_rules",
+                "{weak}"
+            );
+        }
 
         let recovery_key = backend.create_vault(PASSWORD).unwrap();
         assert_eq!(recovery_key.len(), 39);
@@ -738,12 +1037,7 @@ mod tests {
         next_start.unlock(PASSWORD).unwrap();
         next_start.lock();
         next_start.unlock(PASSWORD).unwrap();
-        assert_eq!(
-            std::fs::read_dir(dir.path().join("backups"))
-                .unwrap()
-                .count(),
-            1
-        );
+        assert_eq!(fs::read_dir(dir.path().join("backups")).unwrap().count(), 1);
         assert!(!next_start.status().backup_failed);
     }
 
@@ -755,35 +1049,41 @@ mod tests {
         backend.lock();
 
         assert_eq!(
-            backend
-                .recover("not a key", "a brand new password")
-                .unwrap_err()
-                .code,
+            backend.recover(&recovery_key, "weak").unwrap_err().code,
+            "password_rules"
+        );
+        assert_eq!(
+            backend.recover("not a key", NEW_PASSWORD).unwrap_err().code,
             "invalid_recovery_key"
         );
         backend
-            .recover(&recovery_key.to_lowercase(), "a brand new password")
+            .recover(&recovery_key.to_lowercase(), NEW_PASSWORD)
             .unwrap();
         backend.lock();
         assert_eq!(backend.unlock(PASSWORD).unwrap_err().code, "wrong_password");
-        backend.unlock("a brand new password").unwrap();
+        backend.unlock(NEW_PASSWORD).unwrap();
     }
 
     #[test]
-    fn changing_the_password_needs_the_current_one() {
+    fn changing_the_password_needs_the_current_one_and_the_rules() {
         let (_dir, mut backend) = unlocked();
         assert_eq!(
             backend
-                .change_password("guess guess guess", "another good password")
+                .change_password("guess guess guess", OTHER_PASSWORD)
                 .unwrap_err()
                 .code,
             "wrong_password"
         );
-        backend
-            .change_password(PASSWORD, "another good password")
-            .unwrap();
+        assert_eq!(
+            backend
+                .change_password(PASSWORD, "no rules at all")
+                .unwrap_err()
+                .code,
+            "password_rules"
+        );
+        backend.change_password(PASSWORD, OTHER_PASSWORD).unwrap();
         backend.lock();
-        backend.unlock("another good password").unwrap();
+        backend.unlock(OTHER_PASSWORD).unwrap();
     }
 
     #[test]
@@ -953,7 +1253,7 @@ mod tests {
     #[test]
     fn a_vault_it_cannot_open_is_reported_and_left_alone() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(vault_path(dir.path()), b"not a vault, keep me").unwrap();
+        fs::write(vault_path(dir.path()), b"not a vault, keep me").unwrap();
         let mut backend = Backend::open(dir.path().to_owned(), FAST);
         let status = backend.status();
         assert!(status.vault_exists);
@@ -963,7 +1263,7 @@ mod tests {
             "vault_exists"
         );
         assert_eq!(
-            std::fs::read(vault_path(dir.path())).unwrap(),
+            fs::read(vault_path(dir.path())).unwrap(),
             b"not a vault, keep me"
         );
     }
@@ -976,5 +1276,128 @@ mod tests {
         );
         assert_eq!(normalize_host("example.org."), "example.org");
         assert_eq!(normalize_host("localhost:5173/app"), "localhost:5173");
+    }
+
+    #[test]
+    fn a_csv_import_shows_a_preview_and_can_delete_its_file() {
+        let (dir, mut backend) = unlocked();
+        backend.save_item(login("pw-existing")).unwrap();
+        let path = csv_file(
+            dir.path(),
+            "name,url,username,password,note\n\
+             GitHub,https://github.com,octo,pw-1,\n\
+             Groq,https://console.groq.com,you@example.com,pw-2,\n",
+        );
+
+        let preview = backend.import_open(path.clone()).unwrap();
+        assert!(!preview.needs_password);
+        assert!(preview.plaintext);
+        assert_eq!(preview.source, Some(Source::Chromium));
+        assert_eq!(preview.total, 2);
+        assert_eq!(preview.new_services, ["GitHub", "Groq"]);
+        assert_eq!(preview.counts.len(), 1);
+        let json = serde_json::to_string(&preview).unwrap();
+        assert!(!json.contains("pw-1"), "the preview carries no secrets");
+
+        let result = backend.import_commit(true).unwrap();
+        assert_eq!(
+            (result.items, result.services, result.source_deleted),
+            (2, 2, true)
+        );
+        assert!(!path.exists());
+        assert_eq!(backend.items().unwrap().len(), 3);
+        assert_eq!(backend.import_commit(false).unwrap_err().code, "no_import");
+    }
+
+    #[test]
+    fn an_export_comes_back_through_import_with_its_password() {
+        let (dir, mut backend) = unlocked();
+        let mut service = Backend::empty_service("Anthropic");
+        service.domains = vec![DomainRule::new("anthropic.com")];
+        let service_id = backend.save_service(service).unwrap();
+        let mut key = Backend::empty_item(ItemType::ApiKey);
+        key.service_id = Some(service_id);
+        if let ItemData::ApiKey(data) = &mut key.data {
+            data.key = Secret::new("sk-exported");
+        }
+        backend.save_item(key).unwrap();
+        backend.save_item(login("pw-exported")).unwrap();
+
+        let export_path = dir.path().join("export.json");
+        assert_eq!(
+            backend.export_to(&export_path, "weak").unwrap_err().code,
+            "password_rules"
+        );
+        assert!(!export_path.exists());
+        backend.export_to(&export_path, EXPORT_PASSWORD).unwrap();
+        let text = fs::read_to_string(&export_path).unwrap();
+        assert!(!text.contains("sk-exported") && !text.contains("Anthropic"));
+
+        let other_dir = tempfile::tempdir().unwrap();
+        let mut other = Backend::open(other_dir.path().to_owned(), FAST);
+        other.create_vault(PASSWORD).unwrap();
+        let preview = other.import_open(export_path.clone()).unwrap();
+        assert!(preview.needs_password);
+        assert_eq!(
+            other.import_unlock("Wrong-password-5").unwrap_err().code,
+            "import_wrong_password"
+        );
+        let preview = other.import_unlock(EXPORT_PASSWORD).unwrap();
+        assert_eq!(
+            (preview.total, preview.source, preview.plaintext),
+            (2, Some(Source::Krypt), false)
+        );
+        assert_eq!(preview.new_services, ["Anthropic"]);
+        let result = other.import_commit(true).unwrap();
+        assert!(
+            !result.source_deleted,
+            "a Krypt export is encrypted and stays"
+        );
+        assert!(export_path.exists());
+        assert_eq!(other.services().unwrap()[0].name, "Anthropic");
+        assert_eq!(other.items().unwrap().len(), 2);
+
+        backend.import_open(export_path).unwrap();
+        let again = backend.import_unlock(EXPORT_PASSWORD).unwrap();
+        assert_eq!((again.total, again.duplicates), (0, 2));
+    }
+
+    #[test]
+    fn locking_forgets_a_prepared_import() {
+        let (dir, mut backend) = unlocked();
+        let path = csv_file(
+            dir.path(),
+            "name,url,username,password\nX,https://x.example,u,p\n",
+        );
+        backend.import_open(path).unwrap();
+        backend.lock();
+        backend.unlock(PASSWORD).unwrap();
+        assert_eq!(backend.import_commit(false).unwrap_err().code, "no_import");
+    }
+
+    #[test]
+    fn files_that_hold_nothing_to_import_are_reported() {
+        let (dir, mut backend) = unlocked();
+        let numbers = csv_file(dir.path(), "just,some,numbers\n1,2,3\n");
+        assert_eq!(
+            backend.import_open(numbers).unwrap_err().code,
+            "import_unknown_format"
+        );
+        let empty = csv_file(dir.path(), "name,url,username,password\n");
+        assert_eq!(backend.import_open(empty).unwrap_err().code, "import_empty");
+    }
+
+    #[test]
+    fn the_generator_needs_no_vault() {
+        let generated = Backend::generate(&GeneratorOptions::default()).unwrap();
+        assert_eq!(generated.value.expose().chars().count(), 20);
+        assert_eq!(generated.bits, 128);
+    }
+
+    #[test]
+    fn dates_for_file_names() {
+        assert_eq!(date_from_days(0), "1970-01-01");
+        assert_eq!(date_from_days(11_016), "2000-02-29");
+        assert_eq!(date_from_days(20_711), "2026-09-15");
     }
 }

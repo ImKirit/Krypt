@@ -3,13 +3,21 @@ import type { FormEvent } from "react";
 import { api } from "../api";
 import { errorText, useT } from "../i18n";
 import { Icon } from "../icons";
-import { Brand, Button, SecretField, StrengthMeter, TextField, useToast } from "../ui";
+import { rulesMet } from "../rules";
+import {
+  Brand,
+  Button,
+  PasswordChecklist,
+  SecretField,
+  StrengthMeter,
+  TextField,
+  useToast,
+} from "../ui";
 
 function passwordProblems(password: string, confirm: string, minChars: number) {
   return {
-    tooShort: [...password].length < minChars,
     mismatch: confirm.length > 0 && password !== confirm,
-    ready: [...password].length >= minChars && password === confirm,
+    ready: rulesMet(password, minChars) && password === confirm,
   };
 }
 
@@ -55,9 +63,7 @@ export function Setup({
           autoFocus
         />
         <StrengthMeter password={password} />
-        <p className={`hint ${check.tooShort && password ? "warn" : ""}`}>
-          {t("setup.min", { n: minChars })}
-        </p>
+        <PasswordChecklist id="setup-rules" password={password} minChars={minChars} />
         <SecretField
           id="setup-confirm"
           label={t("setup.confirm")}
@@ -208,9 +214,7 @@ export function Unlock({ minChars, onUnlocked }: { minChars: number; onUnlocked:
             mono={false}
           />
           <StrengthMeter password={newPassword} />
-          <p className={`hint ${check.tooShort && newPassword ? "warn" : ""}`}>
-            {t("setup.min", { n: minChars })}
-          </p>
+          <PasswordChecklist id="recover-rules" password={newPassword} minChars={minChars} />
           <SecretField
             id="recover-confirm"
             label={t("recover.confirm")}

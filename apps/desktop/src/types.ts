@@ -256,3 +256,63 @@ export interface TotpNow {
   remaining: number;
   period: number;
 }
+
+export interface PasswordOptions {
+  length: number;
+  lowercase: boolean;
+  uppercase: boolean;
+  digits: boolean;
+  symbols: boolean;
+  avoid_ambiguous: boolean;
+}
+
+export interface PassphraseOptions {
+  words: number;
+  separator: string;
+  capitalize: boolean;
+  number: boolean;
+}
+
+export type GeneratorOptions =
+  | ({ kind: "password" } & PasswordOptions)
+  | ({ kind: "passphrase" } & PassphraseOptions);
+
+export interface GeneratedPassword {
+  value: string;
+  bits: number;
+}
+
+export type ImportSource =
+  | "krypt"
+  | "bitwarden"
+  | "chromium"
+  | "firefox"
+  | "safari"
+  | "one_password"
+  | "last_pass"
+  | "kee_pass"
+  | "dashlane"
+  | "proton_pass"
+  | "nord_pass"
+  | "robo_form"
+  | "csv";
+
+/** Names and counts only; the backend keeps the entries until the import is confirmed. */
+export interface ImportPreview {
+  file_name: string;
+  needs_password: boolean;
+  source: ImportSource | null;
+  counts: { item_type: ItemType; count: number }[];
+  total: number;
+  new_services: string[];
+  existing_services: string[];
+  duplicates: number;
+  skipped: number;
+  plaintext: boolean;
+}
+
+export interface ImportResult {
+  items: number;
+  services: number;
+  source_deleted: boolean;
+}

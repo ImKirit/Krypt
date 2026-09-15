@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  GeneratedPassword,
+  GeneratorOptions,
+  ImportPreview,
+  ImportResult,
   Item,
   ItemSummary,
   ItemType,
@@ -49,6 +53,18 @@ export const api = {
   totpNow: (id: string) => invoke<TotpNow>("totp_now", { id }),
 
   saveSettings: (settings: Settings) => invoke<Settings>("save_settings", { settings }),
+
+  generatePassword: (options: GeneratorOptions) =>
+    invoke<GeneratedPassword>("generate_password", { options }),
+  /** Opens the save dialog. Resolves to the file name, or null if the dialog was cancelled. */
+  exportVault: (password: string, title: string) =>
+    invoke<string | null>("export_vault", { password, title }),
+  /** Opens the file dialog. Resolves to null if it was cancelled. */
+  importPick: (title: string) => invoke<ImportPreview | null>("import_pick", { title }),
+  importUnlock: (password: string) => invoke<ImportPreview>("import_unlock", { password }),
+  importCommit: (deleteSource: boolean) =>
+    invoke<ImportResult>("import_commit", { deleteSource }),
+  importCancel: () => invoke<void>("import_cancel"),
 
   onLocked: (handler: () => void) => listen("vault-locked", handler),
 };

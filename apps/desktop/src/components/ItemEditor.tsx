@@ -27,6 +27,7 @@ import type {
   TotpConfig,
 } from "../types";
 import { Button, ConfirmDialog, IconButton, Modal, SecretField, TextField } from "../ui";
+import { GeneratorPanel } from "./Generator";
 
 const NEW_SERVICE = "__new__";
 
@@ -34,6 +35,7 @@ type Patch = Record<string, unknown>;
 
 function FieldInput({ def, value, onChange }: { def: FieldDef; value: unknown; onChange: (value: unknown) => void }) {
   const { t } = useT();
+  const [generating, setGenerating] = useState(false);
   const id = `field-${def.key}`;
   const label = t(def.label);
   const asText = (v: unknown) => (v === null || v === undefined ? "" : String(v));
@@ -41,10 +43,34 @@ function FieldInput({ def, value, onChange }: { def: FieldDef; value: unknown; o
   const wrap = (node: React.ReactNode) => (isWide(def.kind) ? <div className="span-2">{node}</div> : node);
 
   switch (def.kind) {
-    case "secret":
-      return (
-        <SecretField id={id} label={label} value={asText(value)} mono={def.monospace} disabled={def.readOnly} onChange={(text) => onChange(fromText(text))} />
+    case "secret": {
+      const field = (
+        <SecretField
+          id={id}
+          label={label}
+          value={asText(value)}
+          mono={def.monospace}
+          disabled={def.readOnly}
+          onChange={(text) => onChange(fromText(text))}
+          onGenerate={def.generate ? () => setGenerating((open) => !open) : undefined}
+        />
       );
+      if (!def.generate) return field;
+      return (
+        <div className="span-2 generated-field">
+          {field}
+          {generating && (
+            <GeneratorPanel
+              onUse={(text) => {
+                onChange(text);
+                setGenerating(false);
+              }}
+              onClose={() => setGenerating(false)}
+            />
+          )}
+        </div>
+      );
+    }
     case "secretMultiline":
       return wrap(
         <SecretField id={id} label={label} value={asText(value)} multiline mono={def.monospace} onChange={(text) => onChange(fromText(text))} />,
