@@ -14,6 +14,10 @@ pub enum Error {
     WrongPassword,
     #[error("wrong recovery key")]
     WrongRecoveryKey,
+    #[error("this device key does not open the vault")]
+    WrongDeviceKey,
+    #[error("the vault has no such key slot")]
+    SlotNotFound,
     #[error("the vault is damaged: {0}")]
     Corrupt(&'static str),
     #[error(transparent)]

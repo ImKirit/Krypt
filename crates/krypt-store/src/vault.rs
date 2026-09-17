@@ -443,11 +443,26 @@ impl LockedVault {
         }
     }
 
-    fn slots(&self, kind: SlotKind) -> Result<Vec<KeySlot>> {
-        read_slots(&self.conn, kind)
+    /// Opens the vault through a device or passkey slot, with a key-encryption key from outside
+    /// the core such as one derived from a Windows Hello signature.
+    pub fn unlock_with_external_key(self, slot_id: Uuid, kek: &Key) -> UnlockResult {
+        let attempt = read_slot(&self.conn, slot_id).and_then(|slot| match slot {
+            Some(slot) if matches!(slot.kind, SlotKind::Device | SlotKind::Passkey) => slot
+                .unlock_with_external_key(kek)
+                .map_err(|error| match error {
+                    krypt_core::Error::Decrypt => Error::WrongDeviceKey,
+                    other => other.into(),
+                }),
+            _ => Err(Error::SlotNotFound),
+        });
+        self.finish_unlock(attempt)
     }
 
-    fn vault_id(&self) -> Result<Uuid> {
+    pub fn has_slot(&self, id: Uuid) -> Result<bool> {
+        slot_exists(&self.conn, id)
+    }
+
+    pub fn vault_id(&self) -> Result<Uuid> {
         let id: String =
             self.conn
                 .query_row("SELECT vault_id FROM vault_meta WHERE id = 1", [], |row| {
@@ -455,6 +470,77 @@ impl LockedVault {
                 })?;
         Uuid::parse_str(&id).map_err(|_| Error::Corrupt("vault id is not a UUID"))
     }
+
+    fn slots(&self, kind: SlotKind) -> Result<Vec<KeySlot>> {
+        read_slots(&self.conn, kind)
+    }
+}
+
+/// Ways in whose key comes from outside the core: a device now, a passkey later.
+impl Vault {
+    /// Adds a device or passkey slot for `kek` and returns its id. The slot must open the vault
+    /// before it is written.
+    pub fn add_external_slot(&mut self, kind: SlotKind, kek: &Key) -> Result<Uuid> {
+        let slot = KeySlot::for_external_key(kind, &self.key, kek)?;
+        ensure_same(&slot.unlock_with_external_key(kek)?, &self.key)?;
+        insert_slot(&self.conn, &slot, now_ms())?;
+        Ok(slot.id)
+    }
+
+    /// Removes a device or passkey slot and purges it from the file and the write-ahead log.
+    /// Password and recovery slots cannot be removed this way. False if there was no such slot.
+    pub fn remove_external_slot(&mut self, id: Uuid) -> Result<bool> {
+        let removed = self.conn.execute(
+            "DELETE FROM key_slots WHERE id = ?1 AND kind IN ('device', 'passkey')",
+            params![id.to_string()],
+        )?;
+        self.conn
+            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(removed == 1)
+    }
+
+    pub fn has_slot(&self, id: Uuid) -> Result<bool> {
+        slot_exists(&self.conn, id)
+    }
+}
+
+fn read_slot(conn: &Connection, id: Uuid) -> Result<Option<KeySlot>> {
+    let found = conn
+        .query_row(
+            "SELECT kind, id, kdf_algorithm, kdf_m_cost, kdf_t_cost, kdf_p_cost, kdf_salt, wrapped_key
+             FROM key_slots WHERE id = ?1",
+            params![id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    SlotRow {
+                        id: row.get(1)?,
+                        kdf_algorithm: row.get(2)?,
+                        m_cost: row.get(3)?,
+                        t_cost: row.get(4)?,
+                        p_cost: row.get(5)?,
+                        salt: row.get(6)?,
+                        wrapped_key: row.get(7)?,
+                    },
+                ))
+            },
+        )
+        .optional()?;
+    found
+        .map(|(kind, row)| {
+            let kind =
+                SlotKind::parse(&kind).ok_or(Error::Corrupt("key slot of an unknown kind"))?;
+            row.into_slot(kind)
+        })
+        .transpose()
+}
+
+fn slot_exists(conn: &Connection, id: Uuid) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM key_slots WHERE id = ?1)",
+        params![id.to_string()],
+        |row| row.get(0),
+    )?)
 }
 
 impl fmt::Debug for Vault {

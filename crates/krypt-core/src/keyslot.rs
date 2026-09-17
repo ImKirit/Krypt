@@ -140,6 +140,20 @@ fn password_kek(password: &str, kdf: &PasswordKdf) -> Result<Key> {
     crypto::derive_key(master.as_bytes(), INFO_PASSWORD)
 }
 
+const INFO_DEVICE: &str = "krypt/v1/kek/device";
+/// An RSA signature from Windows Hello has 256 bytes; anything this short is no such signature.
+const MIN_SIGNATURE_LEN: usize = 64;
+
+/// The key-encryption key of a device slot, derived from the operating system's signature over
+/// the slot's challenge (Windows Hello). The signature scheme is deterministic, so every unlock
+/// derives the same key.
+pub fn device_kek(signature: &[u8]) -> Result<Key> {
+    if signature.len() < MIN_SIGNATURE_LEN {
+        return Err(Error::InvalidSignature);
+    }
+    crypto::derive_key(signature, INFO_DEVICE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +280,25 @@ mod tests {
             assert_eq!(SlotKind::parse(kind.as_str()), Some(kind));
         }
         assert_eq!(SlotKind::parse("master"), None);
+    }
+
+    #[test]
+    fn a_device_signature_always_gives_the_same_key() {
+        let signature = [42u8; 256];
+        let kek = device_kek(&signature).unwrap();
+        assert!(kek.same_as(&device_kek(&signature).unwrap()));
+        assert!(!kek.same_as(&device_kek(&[43u8; 256]).unwrap()));
+        // Bound to its purpose: the same bytes as a recovery key give another key.
+        assert!(!kek.same_as(&crypto::derive_key(&signature, INFO_RECOVERY).unwrap()));
+        assert_eq!(device_kek(&[1u8; 16]).unwrap_err(), Error::InvalidSignature);
+
+        let vault_key = Key::random().unwrap();
+        let slot = KeySlot::for_external_key(SlotKind::Device, &vault_key, &kek).unwrap();
+        let again = device_kek(&signature).unwrap();
+        assert!(
+            slot.unlock_with_external_key(&again)
+                .unwrap()
+                .same_as(&vault_key)
+        );
     }
 }

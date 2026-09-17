@@ -507,3 +507,49 @@ fn many_records_are_written_in_one_go() {
     assert_eq!(vault.items_for_service(groq.id).unwrap().len(), 50);
     assert_eq!(vault.items_for_service(github.id).unwrap().len(), 1);
 }
+
+#[test]
+fn a_device_slot_opens_the_vault_until_it_is_removed() {
+    use krypt_core::crypto::Key;
+    use krypt_core::keyslot::SlotKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut vault, _) = new_vault(dir.path());
+    let vault_id = vault.vault_id();
+    let kek = Key::random().unwrap();
+    let slot_id = vault.add_external_slot(SlotKind::Device, &kek).unwrap();
+    assert!(vault.has_slot(slot_id).unwrap());
+    assert!(matches!(
+        vault.add_external_slot(SlotKind::Password, &kek),
+        Err(Error::Core(krypt_core::Error::SlotKind))
+    ));
+    let path = vault.path().to_owned();
+    drop(vault);
+
+    let locked = LockedVault::open(&path).unwrap();
+    assert_eq!(locked.vault_id().unwrap(), vault_id);
+    assert!(locked.has_slot(slot_id).unwrap());
+    let failed = *locked
+        .unlock_with_external_key(slot_id, &Key::random().unwrap())
+        .unwrap_err();
+    assert!(matches!(failed.error, Error::WrongDeviceKey));
+    let failed = *failed
+        .vault
+        .unlock_with_external_key(uuid::Uuid::new_v4(), &kek)
+        .unwrap_err();
+    assert!(matches!(failed.error, Error::SlotNotFound));
+    let mut vault = failed
+        .vault
+        .unlock_with_external_key(slot_id, &kek)
+        .unwrap();
+    assert_eq!(vault.items().unwrap().len(), 0);
+
+    assert!(vault.remove_external_slot(slot_id).unwrap());
+    assert!(!vault.remove_external_slot(slot_id).unwrap());
+    let locked = vault.lock();
+    assert!(!locked.has_slot(slot_id).unwrap());
+    let failed = *locked.unlock_with_external_key(slot_id, &kek).unwrap_err();
+    assert!(matches!(failed.error, Error::SlotNotFound));
+    // The password still opens the vault.
+    failed.vault.unlock_with_password(PASSWORD).unwrap();
+}
