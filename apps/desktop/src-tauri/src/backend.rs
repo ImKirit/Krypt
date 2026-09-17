@@ -6,9 +6,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use krypt_core::crypto::KdfParams;
+use krypt_core::crypto::{self, KdfParams};
 use krypt_core::export::{self, ExportPayload};
 use krypt_core::generator::{self, GeneratorOptions};
+use krypt_core::keyslot::{self, SlotKind};
 use krypt_core::model::{Item, ItemData, ItemType, PasswordChange, Service};
 use krypt_core::password::{MIN_CHARS as MIN_PASSWORD_CHARS, PasswordRules};
 use krypt_core::recovery::RecoveryKey;
@@ -21,6 +22,7 @@ use serde_json::Value;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::device::{CHALLENGE_LEN, DeviceRecord};
 use crate::error::{AppError, AppResult};
 use crate::settings::Settings;
 
@@ -51,6 +53,12 @@ pub struct Backend {
     backed_up: bool,
     backup_failed: bool,
     pending_import: Option<PendingImport>,
+    /// Whether Windows Hello is set up on this PC; checked once in the background at start.
+    hello_supported: bool,
+    /// When the master password last opened the vault while the app runs.
+    password_unlocked_at: Option<i64>,
+    /// Offer Windows Hello after this unlock with the master password.
+    hello_offer_due: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,6 +70,26 @@ pub struct Status {
     pub backup_failed: bool,
     pub settings: Settings,
     pub min_password_chars: usize,
+    pub hello: HelloStatus,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HelloStatus {
+    /// Windows Hello is set up on this PC.
+    pub supported: bool,
+    /// This PC opens this vault with Windows Hello.
+    pub enrolled: bool,
+    /// The reminder interval has passed, so the master password comes first.
+    pub password_due: bool,
+    /// Ask now whether to use Windows Hello.
+    pub offer: bool,
+}
+
+/// What Windows Hello has to sign. Nothing in it is secret.
+#[derive(Debug)]
+pub struct HelloRequest {
+    pub key_name: String,
+    pub challenge: Vec<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,17 +189,22 @@ impl Backend {
             backed_up: false,
             backup_failed: false,
             pending_import: None,
+            hello_supported: false,
+            password_unlocked_at: None,
+            hello_offer_due: false,
         }
     }
 
     pub fn status(&self) -> Status {
+        let unlocked = matches!(self.slot, VaultSlot::Unlocked(_));
         Status {
             vault_exists: vault_path(&self.data_dir).exists(),
-            unlocked: matches!(self.slot, VaultSlot::Unlocked(_)),
+            unlocked,
             problem: self.problem.clone(),
             backup_failed: self.backup_failed,
             settings: self.settings.clone(),
             min_password_chars: MIN_PASSWORD_CHARS,
+            hello: self.hello_status(unlocked),
         }
     }
 
@@ -187,6 +220,7 @@ impl Backend {
         self.backed_up = true;
         self.slot = VaultSlot::Unlocked(created.vault);
         self.touch();
+        self.password_unlocked();
         Ok(shown)
     }
 
@@ -196,6 +230,7 @@ impl Backend {
             Ok(mut vault) => {
                 self.strengthen(&mut vault, password);
                 self.finish_unlock(vault);
+                self.password_unlocked();
                 Ok(())
             }
             Err(failed) => {
@@ -215,6 +250,9 @@ impl Backend {
             Ok(mut vault) => {
                 let changed = vault.change_password(new_password, self.kdf);
                 self.finish_unlock(vault);
+                if changed.is_ok() {
+                    self.password_unlocked();
+                }
                 changed.map_err(AppError::from)
             }
             Err(failed) => {
@@ -229,6 +267,7 @@ impl Backend {
     pub fn lock(&mut self) -> bool {
         // A prepared import holds decrypted entries.
         self.pending_import = None;
+        self.hello_offer_due = false;
         match std::mem::replace(&mut self.slot, VaultSlot::Busy) {
             VaultSlot::Unlocked(vault) => {
                 self.slot = VaultSlot::Locked(vault.lock());
@@ -582,7 +621,9 @@ impl Backend {
     }
 
     pub fn save_settings(&mut self, settings: Settings) -> AppResult<Settings> {
-        let settings = settings.sanitized();
+        let mut settings = settings.sanitized();
+        // Only the backend decides whether Windows Hello has been offered.
+        settings.hello_offered = self.settings.hello_offered;
         settings.save(&self.data_dir)?;
         self.settings = settings.clone();
         Ok(settings)
@@ -681,6 +722,192 @@ impl Backend {
             .chain(vault.trashed_services()?)
             .map(|record| (record.value.id, record.value.name))
             .collect())
+    }
+}
+
+/// Windows Hello (Weg B). The prompts themselves happen outside, in `lib.rs`, so the backend is
+/// never locked while Windows waits for a PIN or a finger.
+impl Backend {
+    pub fn set_hello_supported(&mut self, supported: bool) {
+        self.hello_supported = supported;
+    }
+
+    /// What Windows Hello has to sign to open the locked vault.
+    pub fn hello_unlock_request(&self) -> AppResult<HelloRequest> {
+        match self.slot {
+            VaultSlot::Locked(_) => {}
+            VaultSlot::Unlocked(_) => return Err(AppError::new("already_unlocked")),
+            VaultSlot::Missing | VaultSlot::Busy => return Err(AppError::new("no_vault")),
+        }
+        let device = self.usable_device()?;
+        Ok(HelloRequest {
+            key_name: device.key_name,
+            challenge: device.challenge,
+        })
+    }
+
+    /// Opens the vault with the signature Windows Hello made for the unlock request.
+    pub fn unlock_with_hello(&mut self, signature: &[u8]) -> AppResult<()> {
+        let device = self.usable_device()?;
+        let kek = keyslot::device_kek(signature)?;
+        let locked = self.take_locked()?;
+        match locked.unlock_with_external_key(device.slot_id, &kek) {
+            Ok(vault) => {
+                self.finish_unlock(vault);
+                Ok(())
+            }
+            Err(failed) => {
+                let failed = *failed;
+                self.slot = VaultSlot::Locked(failed.vault);
+                Err(failed.error.into())
+            }
+        }
+    }
+
+    /// A fresh key name and challenge for turning Windows Hello on. Needs the open vault.
+    pub fn hello_enroll_request(&self) -> AppResult<HelloRequest> {
+        self.vault()?;
+        if !self.hello_supported {
+            return Err(AppError::new("hello_unavailable"));
+        }
+        let mut challenge = vec![0u8; CHALLENGE_LEN];
+        crypto::random_bytes(&mut challenge)?;
+        Ok(HelloRequest {
+            key_name: format!("dev.imkirit.krypt.{}", Uuid::new_v4()),
+            challenge,
+        })
+    }
+
+    /// Adds the device slot for the signature over the request's challenge and writes
+    /// `device.json`. Returns the key name of the device it replaced, which Windows should
+    /// delete.
+    pub fn hello_enroll(
+        &mut self,
+        request: &HelloRequest,
+        signature: &[u8],
+    ) -> AppResult<Option<String>> {
+        self.touch();
+        if request.challenge.len() != CHALLENGE_LEN {
+            return Err(AppError::new("internal"));
+        }
+        let kek = keyslot::device_kek(signature)?;
+        let previous = self.device();
+        let now = now_ms();
+        let last_password_unlock = self
+            .password_unlocked_at
+            .or(previous.as_ref().map(|device| device.last_password_unlock))
+            .unwrap_or(now);
+        let data_dir = self.data_dir.clone();
+
+        let vault = self.vault_mut()?;
+        let slot_id = vault.add_external_slot(SlotKind::Device, &kek)?;
+        let record = DeviceRecord::new(
+            vault.vault_id(),
+            slot_id,
+            request.key_name.clone(),
+            request.challenge.clone(),
+            now,
+            last_password_unlock,
+        );
+        if let Err(error) = record.save(&data_dir) {
+            let _ = vault.remove_external_slot(slot_id);
+            return Err(error);
+        }
+        if let Some(previous) = &previous {
+            let _ = vault.remove_external_slot(previous.slot_id);
+        }
+
+        self.hello_offer_due = false;
+        let _ = self.remember_hello_offered();
+        Ok(previous.map(|device| device.key_name))
+    }
+
+    /// The user does not want Windows Hello now. Krypt does not ask again; the settings still
+    /// offer it.
+    pub fn hello_dismiss(&mut self) -> AppResult<()> {
+        self.hello_offer_due = false;
+        self.remember_hello_offered()
+    }
+
+    /// Removes the device slot and `device.json`. Returns the key name Windows should delete.
+    pub fn hello_forget(&mut self) -> AppResult<Option<String>> {
+        self.touch();
+        let record = DeviceRecord::load(&self.data_dir);
+        let vault = self.vault_mut()?;
+        if let Some(record) = &record
+            && vault.vault_id() == record.vault_id
+        {
+            vault.remove_external_slot(record.slot_id)?;
+        }
+        DeviceRecord::remove(&self.data_dir)?;
+        Ok(record.map(|record| record.key_name))
+    }
+
+    fn hello_status(&self, unlocked: bool) -> HelloStatus {
+        let device = self.device();
+        let enrolled = device.is_some();
+        HelloStatus {
+            supported: self.hello_supported,
+            enrolled,
+            password_due: device.is_some_and(|device| {
+                device.password_due(self.settings.password_reminder_days, now_ms())
+            }),
+            offer: unlocked
+                && self.hello_offer_due
+                && self.hello_supported
+                && !enrolled
+                && !self.settings.hello_offered,
+        }
+    }
+
+    /// The Windows Hello record of this PC, if it belongs to the vault that is open.
+    fn device(&self) -> Option<DeviceRecord> {
+        let record = DeviceRecord::load(&self.data_dir)?;
+        let belongs = match &self.slot {
+            VaultSlot::Locked(vault) => {
+                vault.vault_id().is_ok_and(|id| id == record.vault_id)
+                    && vault.has_slot(record.slot_id).unwrap_or(false)
+            }
+            VaultSlot::Unlocked(vault) => {
+                vault.vault_id() == record.vault_id
+                    && vault.has_slot(record.slot_id).unwrap_or(false)
+            }
+            VaultSlot::Missing | VaultSlot::Busy => false,
+        };
+        belongs.then_some(record)
+    }
+
+    /// The device record, unless there is none or the master password is due.
+    fn usable_device(&self) -> AppResult<DeviceRecord> {
+        let device = self.device().ok_or_else(|| AppError::new("no_device"))?;
+        if device.password_due(self.settings.password_reminder_days, now_ms()) {
+            return Err(AppError::new("password_due"));
+        }
+        Ok(device)
+    }
+
+    /// An unlock with the master password resets the Windows Hello reminder and lets Krypt
+    /// offer Windows Hello once.
+    fn password_unlocked(&mut self) {
+        let now = now_ms();
+        self.password_unlocked_at = Some(now);
+        self.hello_offer_due = true;
+        if let Some(mut device) = self.device() {
+            device.last_password_unlock = now;
+            // Only the reminder depends on it; if the write fails, the password comes back early.
+            let _ = device.save(&self.data_dir);
+        }
+    }
+
+    fn remember_hello_offered(&mut self) -> AppResult<()> {
+        if self.settings.hello_offered {
+            return Ok(());
+        }
+        let mut settings = self.settings.clone();
+        settings.hello_offered = true;
+        settings.save(&self.data_dir)?;
+        self.settings = settings;
+        Ok(())
     }
 }
 
@@ -901,6 +1128,9 @@ mod tests {
     const NEW_PASSWORD: &str = "A-brand-new-password-2";
     const OTHER_PASSWORD: &str = "Another-good-password-3";
     const EXPORT_PASSWORD: &str = "Export-password-4";
+    /// Stands in for the key Windows Hello keeps.
+    const HELLO_SECRET: &[u8] = b"only windows hello knows this key";
+    const DAY_MS: i64 = 86_400_000;
 
     fn unlocked() -> (tempfile::TempDir, Backend) {
         let dir = tempfile::tempdir().unwrap();
@@ -923,6 +1153,34 @@ mod tests {
         let path = dir.join("passwords.csv");
         fs::write(&path, text).unwrap();
         path
+    }
+
+    /// A deterministic signature, like Windows Hello's, without the prompt.
+    fn sign(secret: &[u8], request: &HelloRequest) -> Vec<u8> {
+        let mut signature = vec![0u8; 256];
+        crypto::hkdf_sha256(Some(&request.challenge), secret, b"test", &mut signature).unwrap();
+        signature
+    }
+
+    fn with_hello() -> (tempfile::TempDir, Backend) {
+        let (dir, mut backend) = unlocked();
+        backend.set_hello_supported(true);
+        (dir, backend)
+    }
+
+    fn enroll(backend: &mut Backend) -> HelloRequest {
+        let request = backend.hello_enroll_request().unwrap();
+        let replaced = backend
+            .hello_enroll(&request, &sign(HELLO_SECRET, &request))
+            .unwrap();
+        assert_eq!(replaced, None);
+        request
+    }
+
+    fn age_password_unlock(dir: &Path, days: i64) {
+        let mut record = DeviceRecord::load(dir).unwrap();
+        record.last_password_unlock = now_ms() - days * DAY_MS;
+        record.save(dir).unwrap();
     }
 
     #[test]
@@ -1399,5 +1657,177 @@ mod tests {
         assert_eq!(date_from_days(0), "1970-01-01");
         assert_eq!(date_from_days(11_016), "2000-02-29");
         assert_eq!(date_from_days(20_711), "2026-09-15");
+    }
+
+    #[test]
+    fn windows_hello_opens_the_vault_once_it_is_turned_on() {
+        let (dir, mut backend) = unlocked();
+        assert!(!backend.status().hello.offer, "not without Windows Hello");
+        assert_eq!(
+            backend.hello_enroll_request().unwrap_err().code,
+            "hello_unavailable"
+        );
+        backend.set_hello_supported(true);
+        assert!(
+            backend.status().hello.offer,
+            "offered after the master password was set"
+        );
+
+        let request = enroll(&mut backend);
+        let hello = backend.status().hello;
+        assert!(hello.enrolled && !hello.offer && !hello.password_due);
+        assert!(backend.status().settings.hello_offered);
+        assert!(dir.path().join("device.json").exists());
+
+        backend.lock();
+        let unlock = backend.hello_unlock_request().unwrap();
+        assert_eq!(unlock.key_name, request.key_name);
+        assert_eq!(unlock.challenge, request.challenge);
+        backend
+            .unlock_with_hello(&sign(HELLO_SECRET, &unlock))
+            .unwrap();
+        assert!(backend.status().unlocked);
+        assert_eq!(
+            backend.hello_unlock_request().unwrap_err().code,
+            "already_unlocked"
+        );
+    }
+
+    #[test]
+    fn a_wrong_signature_leaves_the_vault_locked() {
+        let (_dir, mut backend) = with_hello();
+        enroll(&mut backend);
+        backend.lock();
+        let request = backend.hello_unlock_request().unwrap();
+        assert_eq!(
+            backend
+                .unlock_with_hello(&sign(b"another key", &request))
+                .unwrap_err()
+                .code,
+            "device_key_rejected"
+        );
+        assert_eq!(
+            backend.unlock_with_hello(&[1, 2, 3]).unwrap_err().code,
+            "hello_failed"
+        );
+        assert!(!backend.status().unlocked);
+        backend.unlock(PASSWORD).unwrap();
+    }
+
+    #[test]
+    fn the_master_password_comes_back_after_the_reminder_interval() {
+        let (dir, mut backend) = with_hello();
+        let request = enroll(&mut backend);
+        backend.lock();
+        age_password_unlock(dir.path(), 15);
+        assert!(backend.status().hello.password_due);
+        assert_eq!(
+            backend.hello_unlock_request().unwrap_err().code,
+            "password_due"
+        );
+        assert_eq!(
+            backend
+                .unlock_with_hello(&sign(HELLO_SECRET, &request))
+                .unwrap_err()
+                .code,
+            "password_due"
+        );
+
+        backend.unlock(PASSWORD).unwrap();
+        assert!(
+            !backend.status().hello.password_due,
+            "the password resets the reminder"
+        );
+        backend.lock();
+        backend.hello_unlock_request().unwrap();
+
+        let mut never = backend.status().settings;
+        never.password_reminder_days = 0;
+        backend.save_settings(never).unwrap();
+        age_password_unlock(dir.path(), 400);
+        backend.hello_unlock_request().unwrap();
+    }
+
+    #[test]
+    fn forgetting_this_pc_removes_the_slot_and_the_file() {
+        let (dir, mut backend) = with_hello();
+        let request = enroll(&mut backend);
+        assert_eq!(
+            backend.hello_forget().unwrap(),
+            Some(request.key_name.clone())
+        );
+        assert!(!dir.path().join("device.json").exists());
+        assert!(!backend.status().hello.enrolled);
+        backend.lock();
+        assert_eq!(
+            backend.hello_unlock_request().unwrap_err().code,
+            "no_device"
+        );
+        assert_eq!(
+            backend
+                .unlock_with_hello(&sign(HELLO_SECRET, &request))
+                .unwrap_err()
+                .code,
+            "no_device"
+        );
+    }
+
+    #[test]
+    fn turning_windows_hello_on_again_replaces_the_old_slot() {
+        let (_dir, mut backend) = with_hello();
+        let first = enroll(&mut backend);
+        let second = backend.hello_enroll_request().unwrap();
+        assert_eq!(
+            backend
+                .hello_enroll(&second, &sign(b"a new key", &second))
+                .unwrap(),
+            Some(first.key_name.clone())
+        );
+        backend.lock();
+        assert_eq!(
+            backend
+                .unlock_with_hello(&sign(HELLO_SECRET, &first))
+                .unwrap_err()
+                .code,
+            "device_key_rejected"
+        );
+        backend
+            .unlock_with_hello(&sign(b"a new key", &second))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_dismissed_offer_does_not_come_back() {
+        let (_dir, mut backend) = with_hello();
+        assert!(backend.status().hello.offer);
+        backend.hello_dismiss().unwrap();
+        assert!(!backend.status().hello.offer);
+        backend.lock();
+        backend.unlock(PASSWORD).unwrap();
+        assert!(!backend.status().hello.offer);
+
+        // Settings saved from the window cannot bring the offer back.
+        let mut settings = backend.status().settings;
+        settings.hello_offered = false;
+        backend.save_settings(settings).unwrap();
+        assert!(backend.status().settings.hello_offered);
+    }
+
+    #[test]
+    fn a_device_file_of_another_vault_is_ignored() {
+        let (dir, mut backend) = with_hello();
+        let request = enroll(&mut backend);
+        let mut record = DeviceRecord::load(dir.path()).unwrap();
+        record.vault_id = Uuid::new_v4();
+        record.save(dir.path()).unwrap();
+        assert!(!backend.status().hello.enrolled);
+        backend.lock();
+        assert_eq!(
+            backend
+                .unlock_with_hello(&sign(HELLO_SECRET, &request))
+                .unwrap_err()
+                .code,
+            "no_device"
+        );
     }
 }

@@ -29,6 +29,8 @@ impl From<krypt_store::Error> for AppError {
             E::NewerFormat { .. } => "newer_format",
             E::WrongPassword => "wrong_password",
             E::WrongRecoveryKey => "wrong_recovery_key",
+            E::WrongDeviceKey => "device_key_rejected",
+            E::SlotNotFound => "no_device",
             E::Corrupt(_) => "corrupt",
             E::Core(core) => core_code(core),
             E::Sqlite(_) => "database",
@@ -81,6 +83,7 @@ fn core_code(error: &krypt_core::Error) -> &'static str {
         E::GeneratorOptions => "generator_options",
         E::NotAnExport => "import_unknown_format",
         E::ExportVersion(_) => "export_version",
+        E::InvalidSignature => "hello_failed",
         E::Decrypt | E::Truncated | E::UnsupportedVersion(_) | E::Format | E::KdfParams => {
             "corrupt"
         }

@@ -28,8 +28,16 @@ zeroize = "1.9.0"
 
 [target."cfg(windows)".dependencies]
 clipboard-win = "5.4.1"
-# Already part of the build through Tauri; only the session query is used directly.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_RemoteDesktop"] }
+# Already part of the build through Tauri; used directly for the session query and Windows Hello.
+windows = { version = "0.61", features = [
+    "Foundation",
+    "Security_Credentials",
+    "Security_Cryptography",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

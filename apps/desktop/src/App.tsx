@@ -15,13 +15,18 @@ export function App() {
   const [fatal, setFatal] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
+  // Windows Hello opens on its own only on the unlock screen the app starts with, not after
+  // locking by hand.
+  const autoHello = useRef<boolean | null>(null);
 
   const lang: Lang = status?.settings.language ?? systemLang();
   const t = useMemo(() => makeTranslate(lang), [lang]);
 
   const refresh = useCallback(async () => {
     try {
-      setStatus(await api.status());
+      const next = await api.status();
+      if (autoHello.current === null) autoHello.current = next.vault_exists && !next.unlocked;
+      setStatus(next);
     } catch (error) {
       setFatal(errorText(makeTranslate(systemLang()), error));
     }
@@ -35,9 +40,11 @@ export function App() {
 
   useEffect(() => {
     void refresh();
-    const unlisten = api.onLocked(() => void refresh());
+    const unlistenLocked = api.onLocked(() => void refresh());
+    const unlistenChanged = api.onStatusChanged(() => void refresh());
     return () => {
-      void unlisten.then((stop) => stop());
+      void unlistenLocked.then((stop) => stop());
+      void unlistenChanged.then((stop) => stop());
     };
   }, [refresh]);
 
@@ -80,7 +87,18 @@ export function App() {
   } else if (!status.vault_exists) {
     screen = <Setup minChars={status.min_password_chars} onCreated={setRecoveryKey} />;
   } else if (!status.unlocked) {
-    screen = <Unlock minChars={status.min_password_chars} onUnlocked={() => void refresh()} />;
+    screen = (
+      <Unlock
+        minChars={status.min_password_chars}
+        hello={status.hello}
+        reminderDays={status.settings.password_reminder_days}
+        autoHello={autoHello.current === true}
+        onAutoHello={() => {
+          autoHello.current = false;
+        }}
+        onUnlocked={() => void refresh()}
+      />
+    );
   } else {
     screen = (
       <Main

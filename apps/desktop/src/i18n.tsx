@@ -163,6 +163,38 @@ const en = {
   "settings.recoveryNew": "Create a new recovery key",
   "settings.recoveryConfirm": "Replace the recovery key? The old one will no longer open the vault.",
   "settings.replace": "Replace",
+  "settings.hello": "Windows Hello",
+  "settings.helloOn": "This PC opens Krypt with Windows Hello.",
+  "settings.helloOff": "Open Krypt on this PC with your PIN, fingerprint or face.",
+  "settings.helloEnable": "Turn on Windows Hello",
+  "settings.helloForget": "Forget this PC",
+  "settings.helloForgetConfirm":
+    "Forget this PC? Krypt then asks for the master password again every time.",
+  "settings.helloForgotten": "This PC is forgotten.",
+  "settings.reminder": "Ask for the master password every",
+  "settings.days": "{n} days",
+  "hello.unlock": "Unlock with Windows Hello",
+  "hello.or": "or",
+  "hello.due":
+    "Krypt asks for the master password every {n} days, so you keep it in mind. Windows Hello works again afterwards.",
+  "hello.offerTitle": "Windows Hello",
+  "hello.offerText":
+    "Open Krypt on this PC with your PIN, fingerprint or face instead of the master password. Every {n} days Krypt still asks for the master password, so you keep it in mind.",
+  "hello.offerTextNever":
+    "Open Krypt on this PC with your PIN, fingerprint or face instead of the master password.",
+  "hello.notNow": "Not now",
+  "hello.enable": "Use Windows Hello",
+  "hello.enabled": "Windows Hello is on for this PC.",
+  "err.hello_canceled": "Windows Hello was canceled.",
+  "err.hello_unavailable": "Windows Hello is not set up on this PC, or it is locked right now.",
+  "err.hello_failed": "Windows Hello did not work. Use the master password.",
+  "err.hello_key_missing":
+    "The Windows Hello key of this PC is gone. Unlock with the master password and turn Windows Hello on again.",
+  "err.device_key_rejected":
+    "Windows Hello did not open this vault. Unlock with the master password and turn Windows Hello on again.",
+  "err.no_device": "Windows Hello is not turned on for this vault.",
+  "err.password_due":
+    "Krypt asks for the master password every {n} days. Windows Hello works again afterwards.",
   "export.title": "Encrypted export",
   "export.lead":
     "Saves every service and entry, without the trash, in one file. The file gets a password of its own, which you need to import it again. Nobody can recover that password.",
@@ -486,6 +518,39 @@ const de: Record<Key, string> = {
   "settings.recoveryConfirm":
     "Recovery-Key ersetzen? Der alte öffnet den Tresor danach nicht mehr.",
   "settings.replace": "Ersetzen",
+  "settings.hello": "Windows Hello",
+  "settings.helloOn": "Dieser PC öffnet Krypt mit Windows Hello.",
+  "settings.helloOff": "Krypt auf diesem PC mit PIN, Fingerabdruck oder Gesicht öffnen.",
+  "settings.helloEnable": "Windows Hello einschalten",
+  "settings.helloForget": "Diesen PC vergessen",
+  "settings.helloForgetConfirm":
+    "Diesen PC vergessen? Krypt fragt dann wieder jedes Mal nach dem Master-Passwort.",
+  "settings.helloForgotten": "Dieser PC ist vergessen.",
+  "settings.reminder": "Master-Passwort abfragen alle",
+  "settings.days": "{n} Tage",
+  "hello.unlock": "Mit Windows Hello entsperren",
+  "hello.or": "oder",
+  "hello.due":
+    "Krypt fragt alle {n} Tage nach dem Master-Passwort, damit du es nicht vergisst. Danach geht Windows Hello wieder.",
+  "hello.offerTitle": "Windows Hello",
+  "hello.offerText":
+    "Krypt auf diesem PC mit PIN, Fingerabdruck oder Gesicht statt mit dem Master-Passwort öffnen. Alle {n} Tage fragt Krypt trotzdem nach dem Master-Passwort, damit du es nicht vergisst.",
+  "hello.offerTextNever":
+    "Krypt auf diesem PC mit PIN, Fingerabdruck oder Gesicht statt mit dem Master-Passwort öffnen.",
+  "hello.notNow": "Nicht jetzt",
+  "hello.enable": "Windows Hello benutzen",
+  "hello.enabled": "Windows Hello ist für diesen PC eingeschaltet.",
+  "err.hello_canceled": "Windows Hello wurde abgebrochen.",
+  "err.hello_unavailable":
+    "Windows Hello ist auf diesem PC nicht eingerichtet oder gerade gesperrt.",
+  "err.hello_failed": "Windows Hello hat nicht funktioniert. Nimm das Master-Passwort.",
+  "err.hello_key_missing":
+    "Der Windows-Hello-Schlüssel dieses PCs ist weg. Entsperre mit dem Master-Passwort und schalte Windows Hello neu ein.",
+  "err.device_key_rejected":
+    "Windows Hello hat diesen Tresor nicht geöffnet. Entsperre mit dem Master-Passwort und schalte Windows Hello neu ein.",
+  "err.no_device": "Windows Hello ist für diesen Tresor nicht eingeschaltet.",
+  "err.password_due":
+    "Krypt fragt alle {n} Tage nach dem Master-Passwort. Danach geht Windows Hello wieder.",
   "export.title": "Verschlüsselter Export",
   "export.lead":
     "Speichert alle Dienste und Einträge ohne den Papierkorb in einer Datei. Die Datei bekommt ein eigenes Passwort, das du zum Importieren brauchst. Niemand kann dieses Passwort wiederherstellen.",

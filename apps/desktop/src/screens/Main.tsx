@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { ExportDialog } from "../components/ExportDialog";
+import { HelloOffer } from "../components/HelloOffer";
 import { ImportDialog } from "../components/ImportDialog";
 import { ItemDetail } from "../components/ItemDetail";
 import { ItemEditor } from "../components/ItemEditor";
@@ -65,6 +66,7 @@ export function Main({
   const [importOpen, setImportOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [confirmEmpty, setConfirmEmpty] = useState(false);
+  const [offerClosed, setOfferClosed] = useState(false);
   const [version, setVersion] = useState(0);
 
   const reload = useCallback(async () => {
@@ -145,13 +147,15 @@ export function Main({
     }
   };
 
-  const dialogOpen =
+  const otherDialogOpen =
     editor !== null ||
     serviceEdit !== null ||
     settingsOpen ||
     importOpen ||
     exportOpen ||
     confirmEmpty;
+  const offerOpen = status.hello.offer && !offerClosed && !otherDialogOpen;
+  const dialogOpen = otherDialogOpen || offerOpen;
 
   // Ctrl+F search, Ctrl+N new entry, Ctrl+L lock. The web view's own meaning of these keys
   // (find bar, new window) is suppressed.
@@ -401,6 +405,20 @@ export function Main({
       )}
       {exportOpen && (
         <ExportDialog minChars={status.min_password_chars} onClose={() => setExportOpen(false)} />
+      )}
+      {offerOpen && (
+        <HelloOffer
+          reminderDays={status.settings.password_reminder_days}
+          onDone={async (enabled) => {
+            setOfferClosed(true);
+            if (enabled) toast(t("hello.enabled"));
+            try {
+              onStatus(await api.status());
+            } catch (error) {
+              report(error);
+            }
+          }}
+        />
       )}
       {confirmEmpty && (
         <ConfirmDialog

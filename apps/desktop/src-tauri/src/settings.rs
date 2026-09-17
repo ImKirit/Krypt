@@ -19,6 +19,11 @@ pub struct Settings {
     pub clipboard_clear_seconds: u32,
     /// Also lock when the Windows session locks or the computer goes to sleep.
     pub lock_with_windows: bool,
+    /// Krypt offers Windows Hello once after an unlock with the master password; this remembers
+    /// that it did, whatever the answer was.
+    pub hello_offered: bool,
+    /// Days after which a PC with Windows Hello asks for the master password again. 0 never.
+    pub password_reminder_days: u32,
 }
 
 impl Default for Settings {
@@ -28,6 +33,8 @@ impl Default for Settings {
             auto_lock_minutes: 15,
             clipboard_clear_seconds: 30,
             lock_with_windows: true,
+            hello_offered: false,
+            password_reminder_days: 14,
         }
     }
 }
@@ -48,6 +55,7 @@ impl Settings {
         }
         self.auto_lock_minutes = self.auto_lock_minutes.min(24 * 60);
         self.clipboard_clear_seconds = self.clipboard_clear_seconds.clamp(5, 600);
+        self.password_reminder_days = self.password_reminder_days.min(365);
         self
     }
 
@@ -77,6 +85,8 @@ mod tests {
             auto_lock_minutes: 5,
             clipboard_clear_seconds: 45,
             lock_with_windows: false,
+            hello_offered: true,
+            password_reminder_days: 30,
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), settings);
@@ -85,12 +95,14 @@ mod tests {
             language: Some("fr".into()),
             auto_lock_minutes: 100_000,
             clipboard_clear_seconds: 0,
-            lock_with_windows: true,
+            password_reminder_days: 10_000,
+            ..Settings::default()
         }
         .sanitized();
         assert_eq!(odd.language, None);
         assert_eq!(odd.auto_lock_minutes, 1440);
         assert_eq!(odd.clipboard_clear_seconds, 5);
+        assert_eq!(odd.password_reminder_days, 365);
     }
 
     #[test]
@@ -105,6 +117,8 @@ mod tests {
         assert_eq!(loaded.language.as_deref(), Some("de"));
         assert_eq!(loaded.auto_lock_minutes, 5);
         assert!(loaded.lock_with_windows);
+        assert!(!loaded.hello_offered);
+        assert_eq!(loaded.password_reminder_days, 14);
     }
 
     #[test]

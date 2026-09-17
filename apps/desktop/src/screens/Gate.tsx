@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { api } from "../api";
+import { api, errorCode } from "../api";
 import { errorText, useT } from "../i18n";
 import { Icon } from "../icons";
 import { rulesMet } from "../rules";
+import type { HelloStatus } from "../types";
 import {
   Brand,
   Button,
@@ -145,7 +146,22 @@ export function RecoveryKeyScreen({ value, onDone }: { value: string; onDone: ()
   );
 }
 
-export function Unlock({ minChars, onUnlocked }: { minChars: number; onUnlocked: () => void }) {
+export function Unlock({
+  minChars,
+  hello,
+  reminderDays,
+  autoHello,
+  onAutoHello,
+  onUnlocked,
+}: {
+  minChars: number;
+  hello: HelloStatus;
+  reminderDays: number;
+  /** Open the Windows Hello prompt right away. */
+  autoHello: boolean;
+  onAutoHello: () => void;
+  onUnlocked: () => void;
+}) {
   const { t } = useT();
   const [mode, setMode] = useState<"password" | "recover">("password");
   const [password, setPassword] = useState("");
@@ -154,7 +170,9 @@ export function Unlock({ minChars, onUnlocked }: { minChars: number; onUnlocked:
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const autoTried = useRef(false);
   const check = passwordProblems(newPassword, confirm, minChars);
+  const helloReady = hello.enrolled && !hello.password_due;
 
   const switchMode = (next: "password" | "recover") => {
     setMode(next);
@@ -175,6 +193,26 @@ export function Unlock({ minChars, onUnlocked }: { minChars: number; onUnlocked:
       setBusy(false);
     }
   };
+
+  const unlockWithHello = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.unlockWithHello();
+      onUnlocked();
+    } catch (err) {
+      // Closing the prompt is a choice, not an error.
+      if (errorCode(err) !== "hello_canceled") setError(errorText(t, err, { n: reminderDays }));
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!autoHello || !helloReady || autoTried.current) return;
+    autoTried.current = true;
+    onAutoHello();
+    void unlockWithHello();
+  });
 
   const recover = async (event: FormEvent) => {
     event.preventDefault();
@@ -248,20 +286,44 @@ export function Unlock({ minChars, onUnlocked }: { minChars: number; onUnlocked:
       <form className="gate-card" id="unlock" onSubmit={unlock}>
         <Brand />
         <h1>{t("unlock.title")}</h1>
+        {helloReady && (
+          <>
+            <Button
+              variant="primary"
+              icon="passkey"
+              id="unlock-hello"
+              disabled={busy}
+              onClick={unlockWithHello}
+            >
+              {t("hello.unlock")}
+            </Button>
+            <div className="divider">{t("hello.or")}</div>
+          </>
+        )}
+        {hello.enrolled && hello.password_due && (
+          <p className="hint" id="hello-due">
+            {t("hello.due", { n: reminderDays })}
+          </p>
+        )}
         <SecretField
           id="unlock-password"
           label={t("unlock.password")}
           value={password}
           onChange={setPassword}
           mono={false}
-          autoFocus
+          autoFocus={!helloReady}
         />
         {error && (
           <p className="error" role="alert">
             {error}
           </p>
         )}
-        <Button type="submit" variant="primary" id="unlock-button" disabled={busy || !password}>
+        <Button
+          type="submit"
+          variant={helloReady ? "default" : "primary"}
+          id="unlock-button"
+          disabled={busy || !password}
+        >
           {busy ? t("unlock.busy") : t("unlock.button")}
         </Button>
         <button type="button" className="link" id="forgot" onClick={() => switchMode("recover")}>

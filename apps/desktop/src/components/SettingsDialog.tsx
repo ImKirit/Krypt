@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
-import { api } from "../api";
+import { api, errorCode } from "../api";
 import { errorText, useT } from "../i18n";
 import { rulesMet } from "../rules";
 import { RecoveryKeyPanel } from "../screens/Gate";
@@ -16,6 +16,7 @@ import {
 
 const AUTO_LOCK = [1, 5, 15, 30, 60, 0];
 const CLIPBOARD = [10, 30, 60, 120];
+const REMINDER = [7, 14, 30, 90, 0];
 
 export function SettingsDialog({
   status,
@@ -41,6 +42,9 @@ export function SettingsDialog({
   const [busy, setBusy] = useState(false);
   const [confirmRecovery, setConfirmRecovery] = useState(false);
   const [newKey, setNewKey] = useState<string | null>(null);
+  const [helloBusy, setHelloBusy] = useState(false);
+  const [confirmForget, setConfirmForget] = useState(false);
+  const [helloMessage, setHelloMessage] = useState<string | null>(null);
 
   const save = async (patch: Partial<Settings>) => {
     setError(null);
@@ -79,13 +83,27 @@ export function SettingsDialog({
     }
   };
 
+  const hello = async (action: () => Promise<void>, done: string) => {
+    setHelloBusy(true);
+    setHelloMessage(null);
+    try {
+      await action();
+      onStatus(await api.status());
+      setHelloMessage(done);
+    } catch (err) {
+      if (errorCode(err) !== "hello_canceled") setHelloMessage(errorText(t, err));
+    } finally {
+      setHelloBusy(false);
+    }
+  };
+
   const ready = current.length > 0 && rulesMet(next, min) && next === confirm;
 
   return (
     <Modal
       title={t("settings.title")}
       onClose={() => {
-        if (!confirmRecovery) onClose();
+        if (!confirmRecovery && !confirmForget && !helloBusy) onClose();
       }}
       wide
       id="settings"
@@ -160,6 +178,58 @@ export function SettingsDialog({
           )}
         </section>
 
+        {status.hello.supported && (
+          <section className="settings-section" id="settings-hello">
+            <div className="section-label">{t("settings.hello")}</div>
+            <div className="row-between">
+              <p className="hint">
+                {t(status.hello.enrolled ? "settings.helloOn" : "settings.helloOff")}
+              </p>
+              {status.hello.enrolled ? (
+                <Button
+                  variant="danger"
+                  id="settings-hello-forget"
+                  disabled={helloBusy}
+                  onClick={() => setConfirmForget(true)}
+                >
+                  {t("settings.helloForget")}
+                </Button>
+              ) : (
+                <Button
+                  icon="passkey"
+                  id="settings-hello-enable"
+                  disabled={helloBusy}
+                  onClick={() => hello(api.helloEnable, t("hello.enabled"))}
+                >
+                  {t("settings.helloEnable")}
+                </Button>
+              )}
+            </div>
+            {status.hello.enrolled && (
+              <div className="form-field narrow">
+                <label htmlFor="settings-reminder">{t("settings.reminder")}</label>
+                <select
+                  id="settings-reminder"
+                  className="input"
+                  value={settings.password_reminder_days}
+                  onChange={(event) => save({ password_reminder_days: Number(event.target.value) })}
+                >
+                  {REMINDER.map((days) => (
+                    <option key={days} value={days}>
+                      {days === 0 ? t("settings.never") : t("settings.days", { n: days })}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {helloMessage && (
+              <p className="hint" id="settings-hello-message">
+                {helloMessage}
+              </p>
+            )}
+          </section>
+        )}
+
         <section className="settings-section">
           <div className="section-label">{t("settings.data")}</div>
           <div className="row-between">
@@ -216,6 +286,17 @@ export function SettingsDialog({
           confirmLabel={t("settings.replace")}
           onCancel={() => setConfirmRecovery(false)}
           onConfirm={createRecoveryKey}
+        />
+      )}
+      {confirmForget && (
+        <ConfirmDialog
+          message={t("settings.helloForgetConfirm")}
+          confirmLabel={t("settings.helloForget")}
+          onCancel={() => setConfirmForget(false)}
+          onConfirm={() => {
+            setConfirmForget(false);
+            void hello(api.helloForget, t("settings.helloForgotten"));
+          }}
         />
       )}
     </Modal>

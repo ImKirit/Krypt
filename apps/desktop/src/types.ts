@@ -235,11 +235,22 @@ export interface Settings {
   auto_lock_minutes: number;
   clipboard_clear_seconds: number;
   lock_with_windows: boolean;
+  /** Set by the backend once Windows Hello was offered; the window cannot reset it. */
+  hello_offered: boolean;
+  /** Days until Windows Hello asks for the master password again. 0 never. */
+  password_reminder_days: number;
 }
 
 export interface AppError {
   code: string;
   message: string;
+}
+
+export interface HelloStatus {
+  supported: boolean;
+  enrolled: boolean;
+  password_due: boolean;
+  offer: boolean;
 }
 
 export interface Status {
@@ -249,6 +260,7 @@ export interface Status {
   backup_failed: boolean;
   settings: Settings;
   min_password_chars: number;
+  hello: HelloStatus;
 }
 
 export interface TotpNow {

@@ -46,6 +46,8 @@ const app = spawn(exe, [], {
     // Native file dialogs cannot be clicked through; debug builds take these paths instead.
     KRYPT_TEST_SAVE_PATH: exportPath,
     KRYPT_TEST_OPEN_PATH: importPath,
+    // A stand-in key instead of the Windows Hello prompt.
+    KRYPT_TEST_FAKE_HELLO: "1",
     // Keep going if the screen of this machine locks during the run.
     KRYPT_IGNORE_SESSION_LOCK: "1",
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
@@ -269,6 +271,10 @@ try {
   await click("#recovery-saved");
   await click("#recovery-done");
   await waitFor("#new-item");
+  await waitFor("#hello-offer");
+  check("Windows Hello is offered once the master password is set", true);
+  await click("#hello-not-now");
+  await waitGone("#hello-offer");
   check("an empty vault offers to import", await js(`!!document.querySelector("#empty-import")`));
 
   // English screenshots, short clipboard timer for the copy check
@@ -473,6 +479,36 @@ try {
   const rowsAfterUnlock = await waitUntil(`document.querySelectorAll("#item-list .row").length`, (count) => count === 8);
   check("the right password opens the vault again", rowsAfterUnlock === 8, `${rowsAfterUnlock} rows`);
   if (rowsAfterUnlock !== 8) await shot("failure-after-unlock");
+
+  // Windows Hello, with the stand-in key debug builds use instead of the prompt
+  await click("#nav-settings");
+  await click("#settings-hello-enable");
+  await waitFor("#settings-hello-forget", 15000);
+  check("Windows Hello can be turned on in the settings", true);
+  await click("#settings .dialog-head .icon-btn");
+  await waitGone("#settings");
+  await press("l");
+  await waitFor("#unlock-hello");
+  check("the unlock screen offers Windows Hello", true);
+  await shot("unlock-hello");
+  await click("#unlock-hello");
+  await waitFor("#new-item", 30000);
+  const rowsAfterHello = await waitUntil(`document.querySelectorAll("#item-list .row").length`, (count) => count === 8);
+  check("Windows Hello opens the vault", rowsAfterHello === 8, `${rowsAfterHello} rows`);
+  await click("#nav-settings");
+  await click("#settings-hello-forget");
+  await waitFor("#confirm");
+  await click("#confirm-yes");
+  await waitFor("#settings-hello-enable", 15000);
+  await click("#settings .dialog-head .icon-btn");
+  await waitGone("#settings");
+  await press("l");
+  await waitFor("#unlock");
+  check("a forgotten PC needs the master password again", !(await js(`!!document.querySelector("#unlock-hello")`)));
+  await fill("#unlock-password", PASSWORD);
+  await click("#unlock-button");
+  await waitFor("#new-item", 30000);
+  await waitUntil(`document.querySelectorAll("#item-list .row").length`, (count) => count === 8);
 
   // Encrypted export
   await openFromSettings("#settings-export", "#export");

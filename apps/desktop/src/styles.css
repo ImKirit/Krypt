@@ -1220,6 +1220,30 @@ select.input {
   }
 }
 
+/* Windows Hello */
+.divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.divider::before,
+.divider::after {
+  content: "";
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+}
+
+.form-field.narrow {
+  max-width: 280px;
+}
+
 /* Password rules */
 .rules {
   display: flex;

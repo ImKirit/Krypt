@@ -28,6 +28,13 @@ export const api = {
     invoke<void>("change_password", { current, newPassword }),
   newRecoveryKey: () => invoke<string>("new_recovery_key"),
 
+  /** Shows the Windows Hello prompt. */
+  unlockWithHello: () => invoke<void>("unlock_with_hello"),
+  /** Shows the Windows Hello prompt, usually twice. */
+  helloEnable: () => invoke<void>("hello_enable"),
+  helloDismiss: () => invoke<void>("hello_dismiss"),
+  helloForget: () => invoke<void>("hello_forget"),
+
   listServices: () => invoke<ServiceSummary[]>("list_services"),
   getService: (id: string) => invoke<Service>("get_service", { id }),
   emptyService: (name: string) => invoke<Service>("empty_service", { name }),
@@ -67,4 +74,12 @@ export const api = {
   importCancel: () => invoke<void>("import_cancel"),
 
   onLocked: (handler: () => void) => listen("vault-locked", handler),
+  onStatusChanged: (handler: () => void) => listen("status-changed", handler),
 };
+
+/** The stable code of a command error, or null for anything else. */
+export function errorCode(error: unknown): string | null {
+  return error && typeof error === "object" && "code" in error
+    ? String((error as { code: unknown }).code)
+    : null;
+}

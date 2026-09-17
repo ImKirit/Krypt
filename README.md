@@ -32,10 +32,11 @@ An account will be optional, and the server will only ever store data it cannot 
 
 ## Status
 
-The Windows app runs from source and covers the local vault: setup, unlocking, every entry
-type, one-time codes, a password generator, import from other password managers and browsers,
-encrypted export, search, trash and auto-lock. There is no release and no installer yet. The
-browser extension, the account and the phone apps are not started.
+The Windows app runs from source and covers the local vault: setup, unlocking with the master
+password or Windows Hello, every entry type, one-time codes, a password generator, import from
+other password managers and browsers, encrypted export, search, trash and auto-lock. There is no
+release and no installer yet. The browser extension, the account and the phone apps are not
+started.
 
 ## Getting started
 
@@ -47,7 +48,8 @@ browser extension, the account and the phone apps are not started.
    <img src="docs/tour-1-setup.png" width="620" alt="Setup screen with every master password rule ticked off">
 
 2. **Write down the recovery key.** It is shown once and is the only way back in if you forget
-   the master password. Krypt only continues after you confirm.
+   the master password. Krypt only continues after you confirm. Afterwards it offers Windows
+   Hello once, so this PC can open the vault with your PIN, fingerprint or face.
 
    <img src="docs/tour-2-recovery-key.png" width="620" alt="Recovery key in eight groups of four characters">
 
@@ -83,6 +85,8 @@ browser extension, the account and the phone apps are not started.
 
 ### Use
 
+- **Windows Hello** opens the vault with your PIN, fingerprint or face. Every 14 days Krypt still
+  asks for the master password, so you keep it in mind; you can change that or turn it off.
 - **Password generator** right under password fields: random characters from the classes you
   pick, or passphrases from the EFF wordlist, with the strength shown in bits.
 - **Hidden until asked.** The window receives a secret only when you show or copy that one
@@ -110,8 +114,8 @@ browser extension, the account and the phone apps are not started.
 |---|---|
 | **Password generator.** Characters or words, right under the field. | **Import.** What will be added, and what is already there. |
 | <img src="docs/generator.png" width="420" alt="Password generator under the password field of a new entry"> | <img src="docs/import-preview.png" width="420" alt="Import preview with one new and one existing service"> |
-| **Unlock.** A wrong password is refused. | **Settings.** Language, auto-lock, clipboard, import and export, master password, recovery key. |
-| <img src="docs/tour-4-unlock.png" width="420" alt="Unlock screen"> | <img src="docs/main-settings.png" width="420" alt="Settings dialog"> |
+| **Unlock.** With Windows Hello or the master password. | **Settings.** Language, auto-lock, clipboard, Windows Hello, import and export, master password, recovery key. |
+| <img src="docs/unlock-hello.png" width="420" alt="Unlock screen with Windows Hello above the master password"> | <img src="docs/main-settings.png" width="420" alt="Settings dialog"> |
 
 ## Keyboard
 
@@ -146,8 +150,9 @@ yet; that is planned before the first release.
 | Master password rules | at least 8 characters with upper and lower case, a digit and a special character, for new master and export passwords |
 | Encryption | XChaCha20-Poly1305, every service and every entry on its own |
 | Tamper detection | each ciphertext is bound to its id, so swapping two records makes both fail to decrypt |
-| Key hierarchy | one random vault key, stored once per way in: master password, recovery key, later a remembered device or a passkey |
+| Key hierarchy | one random vault key, stored once per way in: master password, recovery key, Windows Hello, later a passkey |
 | Recovery key | 160 random bits, shown once, written as eight groups of four characters |
+| Windows Hello | Windows keeps an RSA key for Krypt and signs a random challenge after your PIN, fingerprint or face; the key that opens the vault is derived from that signature, so nothing on disk opens the vault without Windows Hello |
 | Encrypted export | the export password goes through Argon2id and HKDF, the whole content through XChaCha20-Poly1305; only the format version, the Argon2id costs and the salt stay readable |
 | Import | read in Rust and shown as names and counts first; written in one transaction after a backup; the plain text export of the other app can be deleted afterwards |
 | Password generator | the operating system's random number generator, with rejection sampling so every character and word is equally likely |
@@ -155,7 +160,8 @@ yet; that is planned before the first release.
 | Account login | the server never receives anything that can decrypt the vault |
 
 If you lose the master password and the recovery key, the vault cannot be opened. That is the
-cost of nobody else being able to open it.
+cost of nobody else being able to open it. Windows Hello does not replace them: it only works on
+the PC where it was turned on.
 
 The implementation is checked against published test vectors: Argon2id from the reference
 implementation, HKDF from RFC 5869, XChaCha20-Poly1305 from the IETF draft and TOTP from
@@ -167,7 +173,8 @@ RFC 6238.
 %APPDATA%\dev.imkirit.krypt\
 ├─ vault.db         one SQLite file, every service and entry encrypted on its own
 ├─ backups\         copies of vault.db, encrypted the same way
-└─ settings.json    language, auto-lock and clipboard timer, nothing secret
+├─ settings.json    language, auto-lock, clipboard timer and reminder, nothing secret
+└─ device.json      only with Windows Hello: the challenge and the key's name, nothing secret
 ```
 
 Names, domains, entry types and every field are encrypted. What stays readable is how many
@@ -178,7 +185,7 @@ entries exist and when they changed. Exports are saved wherever you choose.
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Crypto core, data model, storage format, tests | Done |
-| 1 | Windows app: local vault, every entry type, generator, import and export, auto-lock, remembered device, installer | In progress |
+| 1 | Windows app: local vault, every entry type, generator, import and export, auto-lock, Windows Hello, installer | In progress |
 | 2 | Chrome extension: save prompt, fill, 2FA, passkeys | Planned |
 | 3 | Optional account: passkey sign-in, encrypted cloud backup | Planned |
 | 4 | Android and iOS, sync between devices | Planned |
@@ -205,7 +212,8 @@ node scripts/drive.mjs <path to krypt.exe>     # drive the debug build and take 
 ```
 
 `scripts/drive.mjs` starts the debug build with a throwaway data folder and clicks through
-setup, entries, copying, the generator, export, import and locking.
+setup, entries, copying, the generator, Windows Hello, export, import and locking. Debug builds
+use a stand-in key there instead of the Windows Hello prompt; the real prompt needs a person.
 
 `crates/krypt-core` holds the cryptography, key slots, the data model, TOTP, the password rules,
 the generator and the export format, with no file system, network or UI code, so the same crate

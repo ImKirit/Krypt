@@ -5,8 +5,10 @@
 
 mod backend;
 mod clipboard;
+mod device;
 mod dialogs;
 mod error;
+mod hello;
 mod session;
 mod settings;
 
@@ -28,9 +30,13 @@ use crate::backend::{
     TotpNow,
 };
 use crate::error::{AppError, AppResult};
+use crate::hello::HelloKey;
 use crate::settings::Settings;
 
 type AppState = Mutex<Backend>;
+
+/// The Windows Hello key store, kept apart from the backend so its prompts never hold the lock.
+struct Hello(Box<dyn HelloKey>);
 
 fn backend<'a>(state: &'a State<'_, AppState>) -> MutexGuard<'a, Backend> {
     state
@@ -269,6 +275,53 @@ fn import_cancel(state: State<'_, AppState>) {
     backend(&state).import_cancel();
 }
 
+/// Shows the Windows Hello prompt and opens the vault with the signature.
+#[tauri::command]
+async fn unlock_with_hello(state: State<'_, AppState>, hello: State<'_, Hello>) -> AppResult<()> {
+    let request = backend(&state).hello_unlock_request()?;
+    let signature = hello.0.sign(&request.key_name, &request.challenge)?;
+    backend(&state).unlock_with_hello(&signature)
+}
+
+/// Creates the Windows Hello key and the device slot. Windows asks twice: once to create the
+/// key, once to sign.
+#[tauri::command]
+async fn hello_enable(state: State<'_, AppState>, hello: State<'_, Hello>) -> AppResult<()> {
+    let request = backend(&state).hello_enroll_request()?;
+    hello.0.create(&request.key_name)?;
+    let enrolled = hello
+        .0
+        .sign(&request.key_name, &request.challenge)
+        .map_err(AppError::from)
+        .and_then(|signature| backend(&state).hello_enroll(&request, &signature));
+    match enrolled {
+        Ok(replaced) => {
+            if let Some(name) = replaced {
+                hello.0.delete(&name);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            hello.0.delete(&request.key_name);
+            Err(error)
+        }
+    }
+}
+
+#[tauri::command]
+fn hello_dismiss(state: State<'_, AppState>) -> AppResult<()> {
+    backend(&state).hello_dismiss()
+}
+
+#[tauri::command]
+async fn hello_forget(state: State<'_, AppState>, hello: State<'_, Hello>) -> AppResult<()> {
+    let key_name = backend(&state).hello_forget()?;
+    if let Some(name) = key_name {
+        hello.0.delete(&name);
+    }
+    Ok(())
+}
+
 fn copy(text: &str, clear_after: Duration) -> AppResult<u64> {
     clipboard::copy_secret(text, clear_after).map_err(|_| AppError::new("clipboard"))?;
     Ok(clear_after.as_secs())
@@ -316,6 +369,17 @@ fn start_auto_lock(app: AppHandle) {
     });
 }
 
+/// Asking Windows whether Hello is set up can take a moment, so it happens in the background and
+/// the window refreshes its status afterwards.
+fn check_hello(app: AppHandle) {
+    thread::spawn(move || {
+        let supported = app.state::<Hello>().0.supported();
+        let state = app.state::<AppState>();
+        backend(&state).set_hello_supported(supported);
+        let _ = app.emit("status-changed", ());
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -325,7 +389,9 @@ pub fn run() {
         .setup(|app| {
             let data_dir = data_dir(app.handle())?;
             app.manage(Mutex::new(Backend::open(data_dir, KdfParams::DEFAULT)));
+            app.manage(Hello(hello::provider()));
             start_auto_lock(app.handle().clone());
+            check_hello(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -363,6 +429,10 @@ pub fn run() {
             import_unlock,
             import_commit,
             import_cancel,
+            unlock_with_hello,
+            hello_enable,
+            hello_dismiss,
+            hello_forget,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Krypt");
